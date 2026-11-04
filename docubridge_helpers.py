@@ -173,6 +173,59 @@ BTN_APPLY = "Оформить заявку"
 BTN_MENU = "В меню"
 BTN_CONFIRM = "Подтвердить"
 BTN_CANCEL = "Отмена"
+BTN_CALC = "Рассчитать точно"
+BTN_SHARE_CONTACT = "📱 Поделиться контактом"
+DOC_OTHER = "Другое"
+DOC_TYPE_BUTTONS = [
+    "Доверенность", "Диплом / аттестат", "Свидетельство",
+    "Справка / выписка", "Договор (копия)", DOC_OTHER,
+]
+VOLUME_PRESETS = {
+    "до 100 г": 100,
+    "до 300 г": 300,
+    "до 500 г": 500,
+    "больше 500 г": ENVELOPE_MAX_G + 1,
+}
+BANNED_DOC_WORDS = [
+    "паспорт", "passport", "id-карт", "id карт", "айди", "удостоверен",
+    "national id", "военн", "военник",
+]
+STEP_QUESTION_WORDS = ("сколько", "цена", "цену", "стоимост", "стоит", "почём", "почем", "тариф")
+
+
+def is_banned_doc(text: Optional[str]) -> bool:
+    low = (text or "").lower()
+    return any(b in low for b in BANNED_DOC_WORDS)
+
+
+def is_step_question(text: Optional[str]) -> bool:
+    """Input on a data step (city, name...) that is really a question, not data."""
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    if "?" in s or "？" in s:
+        return True
+    return any(w in s for w in STEP_QUESTION_WORDS)
+
+
+def route_offer_text(from_country: str, to_country: str) -> str:
+    return (
+        f"Маршрут: {from_country} → {to_country}\n\n"
+        f"📦 Доставка бумажных документов — от €{PRICE_ORDINARY_EUR} "
+        f"(конверт до {ENVELOPE_MAX_G} г), срочно — €{PRICE_URGENT_EUR}.\n"
+        f"⏱ Срок: ~{ETA_RANGE} рабочих дней.\n"
+        "❌ Не принимаем: паспорта, ID-карты, военные билеты.\n\n"
+        "Нажмите «Рассчитать точно» — 3 коротких вопроса кнопками, "
+        "контакты понадобятся только для оформления."
+    )
+
+
+def step_question_answer() -> str:
+    return (
+        f"Коротко: от €{PRICE_ORDINARY_EUR} за конверт до {ENVELOPE_MAX_G} г "
+        f"(срочно €{PRICE_URGENT_EUR}), срок ~{ETA_RANGE} рабочих дней; "
+        "больше 0,5 кг — по согласованию. Паспорта, ID-карты и военные билеты не принимаем."
+    )
 
 DOC_TYPES_HINT = (
     "доверенность, диплом, свидетельство, судебные/нотариальные копии, "
@@ -350,9 +403,16 @@ def parse_int(text: str) -> Optional[int]:
     return None
 
 
+def normalize_phone(s: Optional[str]) -> str:
+    s = re.sub(r"[\s\-().]", "", (s or "").strip())
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    return s
+
+
 def valid_phone(s: str) -> bool:
-    s = (s or "").strip().replace(" ", "").replace("-", "")
-    return s.startswith("+380") or s.startswith("+7") or s.startswith("+375")
+    """International E.164-like: + and 8–15 digits (any country)."""
+    return bool(re.fullmatch(r"\+[1-9]\d{7,14}", normalize_phone(s)))
 
 
 def valid_name(s: str) -> bool:
