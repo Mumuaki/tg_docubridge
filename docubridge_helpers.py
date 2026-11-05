@@ -52,7 +52,7 @@ HELP_TEXT = (
     "• Беларусь → Украина\n\n"
     "Как получить расчёт:\n"
     "1. Нажмите /start и выберите маршрут.\n"
-    "2. Укажите города, тип документа, вес или число листов и срочность.\n"
+    "2. Укажите города, тип документа, вес или число листов.\n"
     "3. Бот сразу покажет ориентировочную цену и срок. Контакты — только если решите оформить заявку.\n\n"
     "Отслеживание: /track и номер DBxxxx.\n\n"
     "Не принимаем: паспорта, ID-карты, военные билеты и другие документы, удостоверяющие личность.\n\n"
@@ -157,9 +157,8 @@ def normalize_status(status: Optional[str]) -> Optional[str]:
             return k
     return None
 
-# Envelope floor: ≤500 g ordinary → €140; urgent higher; over 0.5 kg → по согласованию
+# Envelope floor: ≤500 g → €140 (single tariff, no urgent); over 0.5 kg → по согласованию
 PRICE_ORDINARY_EUR = 140
-PRICE_URGENT_EUR = 145
 ENVELOPE_MAX_G = 500
 ETA_RANGE = "10–14"
 TICKET_RE = re.compile(r"^DB\d{4,}$")
@@ -212,18 +211,18 @@ def route_offer_text(from_country: str, to_country: str) -> str:
     return (
         f"Маршрут: {from_country} → {to_country}\n\n"
         f"📦 Доставка бумажных документов — от €{PRICE_ORDINARY_EUR} "
-        f"(конверт до {ENVELOPE_MAX_G} г), срочно — €{PRICE_URGENT_EUR}.\n"
+        f"(конверт до {ENVELOPE_MAX_G} г).\n"
         f"⏱ Срок: ~{ETA_RANGE} рабочих дней.\n"
         "❌ Не принимаем: паспорта, ID-карты, военные билеты.\n\n"
-        "Нажмите «Рассчитать точно» — 3 коротких вопроса кнопками, "
+        "Нажмите «Рассчитать точно» — 2 коротких вопроса кнопками, "
         "контакты понадобятся только для оформления."
     )
 
 
 def step_question_answer() -> str:
     return (
-        f"Коротко: от €{PRICE_ORDINARY_EUR} за конверт до {ENVELOPE_MAX_G} г "
-        f"(срочно €{PRICE_URGENT_EUR}), срок ~{ETA_RANGE} рабочих дней; "
+        f"Коротко: от €{PRICE_ORDINARY_EUR} за конверт до {ENVELOPE_MAX_G} г, "
+        f"срок ~{ETA_RANGE} рабочих дней; "
         "больше 0,5 кг — по согласованию. Паспорта, ID-карты и военные билеты не принимаем."
     )
 
@@ -295,8 +294,6 @@ def base_price_eur(weight_grams: int, urgency: str) -> Optional[int]:
         return None
     if w > ENVELOPE_MAX_G:
         return None
-    if u == "срочная":
-        return PRICE_URGENT_EUR
     return PRICE_ORDINARY_EUR
 
 
@@ -311,9 +308,7 @@ def compute_quote(d: Dict) -> Dict:
     fc = normalize_country(d.get("from_country", "") or "") or ""
     tc = normalize_country(d.get("to_country", "") or "") or ""
     w = int(d.get("weight_grams") or 0)
-    urgency = (d.get("urgency") or "обычная").strip().lower()
-    if urgency not in {"обычная", "срочная"}:
-        urgency = "обычная"
+    urgency = "обычная"  # single tariff; no urgent option
 
     price = base_price_eur(w, urgency) if w > 0 else None
     eta = eta_working_days(fc, tc)
@@ -322,8 +317,6 @@ def compute_quote(d: Dict) -> Dict:
         notes = "укажите вес или число листов"
     elif w > ENVELOPE_MAX_G:
         notes = "вес > 0,5 кг — стоимость по согласованию"
-    elif urgency == "срочная":
-        notes = "ускоренная доставка"
     else:
         notes = None
 

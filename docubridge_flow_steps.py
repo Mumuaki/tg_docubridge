@@ -55,7 +55,7 @@ def ask_doc_type(chat_id: int, data: Dict[str, Any]):
     set_state(chat_id, "ask_doc_type", data)
     bot.send_message(
         chat_id,
-        "1/3. Какой документ отправляем? Выберите кнопкой или «Другое».\n"
+        "1/2. Какой документ отправляем? Выберите кнопкой или «Другое».\n"
         "Паспорта, ID-карты и военные билеты не принимаем.",
         reply_markup=doc_type_keyboard(),
     )

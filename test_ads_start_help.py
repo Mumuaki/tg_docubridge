@@ -135,7 +135,7 @@ class TestHelpFallback(Base):
 
     def test_quote_flow_intact(self):
         h.start(msg("/start ua_ru"))
-        for t in ("Рассчитать точно", "Диплом / аттестат", "до 300 г", "обычная"):
+        for t in ("Рассчитать точно", "Диплом / аттестат", "до 300 г"):
             h.any_text(msg(t))
         self.assertEqual(self.states[CHAT][0], "quote_shown")
         self.assertIn("€140", self.texts())

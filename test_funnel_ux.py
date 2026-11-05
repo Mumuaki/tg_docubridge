@@ -81,21 +81,30 @@ class TestButtons(Base):
 
     def test_over_500_negotiable(self):
         h.start(msg("/start ua_ru"))
-        for t in (m.BTN_CALC, "Свидетельство", "больше 500 г", "обычная"):
+        for t in (m.BTN_CALC, "Свидетельство", "больше 500 г"):
             h.any_text(msg(t))
         self.assertIn("по согласованию", self.sent[-1][0])
 
     def test_free_text_volume_still_works(self):
         h.start(msg("/start ua_ru"))
-        for t in (m.BTN_CALC, "Свидетельство", "40 листов", "срочная"):
+        for t in (m.BTN_CALC, "Свидетельство", "40 листов"):
             h.any_text(msg(t))
-        self.assertIn("€145", self.sent[-1][0])
+        self.assertIn("€140", self.sent[-1][0])
+        self.assertNotIn("€145", self.sent[-1][0])
+        self.assertNotIn("срочн", self.sent[-1][0].lower())
+
+    def test_offer_has_no_urgent_tariff(self):
+        h.start(msg("/start ua_ru"))
+        text = " ".join(x[0] for x in self.sent).lower()
+        self.assertIn("€140", text)
+        self.assertNotIn("€145", text)
+        self.assertNotIn("срочно", text)
 
 
 class TestPriceBeforeCities(Base):
     def go_to_quote(self):
         h.start(msg("/start ua_by"))
-        for t in (m.BTN_CALC, "Диплом / аттестат", "до 300 г", "обычная"):
+        for t in (m.BTN_CALC, "Диплом / аттестат", "до 300 г"):
             h.any_text(msg(t))
 
     def test_price_without_cities_then_order_card(self):

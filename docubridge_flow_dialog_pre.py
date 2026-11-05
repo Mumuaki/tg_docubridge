@@ -106,7 +106,7 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
         set_state(chat_id, "ask_volume", data)
         bot.send_message(
             chat_id,
-            "2/3. Примерный вес конверта? Выберите кнопкой "
+            "2/2. Примерный вес конверта? Выберите кнопкой "
             "(или напишите: «300 г», «40 листов»). ~1 лист A4 ≈ 6 г.",
             reply_markup=volume_keyboard(),
         )
@@ -131,16 +131,7 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
         if pages is not None:
             data["pages_a4"] = pages
         data["weight_grams"] = weight
-        set_state(chat_id, "ask_urgency", data)
-        bot.send_message(chat_id, "3/3. Срочность доставки?", reply_markup=urgency_keyboard())
-        return True
-
-    if state == "ask_urgency":
-        u = infer_urgency(s) or (s.lower() if s.lower() in {"обычная", "срочная"} else None)
-        if not u:
-            bot.send_message(chat_id, "Выберите: обычная или срочная.", reply_markup=urgency_keyboard())
-            return True
-        data["urgency"] = u
+        data["urgency"] = "обычная"
         set_state(chat_id, "quote_shown", data)
         msg = format_quote_message(data)
         save_message(chat_id, None, msg)
