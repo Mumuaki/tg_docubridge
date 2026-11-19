@@ -37,6 +37,7 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
             bot.send_message(chat_id, step_question_answer() + "\n\nКак к вам обращаться?")
             return
         if not valid_name(s):
+            print(f"[Funnel] chat={chat_id} name rejected: {mask_name(s)!r} (len {len(s)})")
             bot.send_message(
                 chat_id,
                 "Введите имя/фамилию (буквы, пробелы и дефисы; не короче 2 символов).",
@@ -58,6 +59,7 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
             return
         phone = normalize_phone(s)
         if not valid_phone(phone):
+            print(f"[Funnel] chat={chat_id} phone rejected: {mask_phone(s)!r} (digits {sum(c.isdigit() for c in s)})")
             bot.send_message(
                 chat_id,
                 "Нужен номер в формате +код страны и номер (8–15 цифр), "
@@ -85,6 +87,7 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
             return
 
         ticket = create_shipment(chat_id, data)
+        print(f"[Ticket] chat={chat_id} create_shipment -> {ticket or 'FAILED'} ref={data.get('ref') or '-'}")
         if not ticket:
             print(f"[Ticket] create_shipment failed for chat {chat_id} — no ticket issued")
             notify_admin_order_failed(chat_id, data)
@@ -118,7 +121,18 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
 
     if state in {"greeting", "completed"} or not state:
         low = s.lower()
-        if "отправ" in low or "заявк" in low or "расчёт" in low or "расчет" in low:
+        if is_calc_intent(s):
+            # «Рассчитать точно», «сколько стоит», «цена» … → straight into the quote.
+            route = resolve_start_payload(data.get("ref"))
+            if route.get("kind") == "route":
+                data["role"] = data.get("role") or "sender"
+                data["from_country"] = route["from_country"]
+                data["to_country"] = route["to_country"]
+                ask_doc_type(chat_id, data)
+            else:
+                start_send_flow(chat_id, role="sender", ref=data.get("ref"))
+            return
+        if "отправ" in low or "заявк" in low:
             start_send_flow(chat_id, role="sender", ref=data.get("ref"))
             return
         if "получ" in low:

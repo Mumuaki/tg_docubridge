@@ -8,6 +8,22 @@ from docubridge_keyboards import *  # noqa: F401,F403
 
 # ------------ Flow steps ------------
 
+DB_ERROR_TEXT = (
+    "⚠️ Техническая заминка на нашей стороне — ваш ответ не потерян, шаг заявки сохранён.\n"
+    "Пожалуйста, отправьте это сообщение ещё раз через минуту. "
+    "Если не получится — напишите менеджеру: {manager}."
+)
+
+
+def send_db_error(chat_id: int):
+    """DB unavailable: tell the user to retry instead of silently resetting the funnel."""
+    print(f"[Funnel] chat={chat_id} DB unavailable — asked user to retry (state kept)")
+    try:
+        bot.send_message(chat_id, DB_ERROR_TEXT.format(manager=MANAGER_CONTACT))
+    except Exception as e:
+        print(f"[Funnel] send_db_error failed: {e}")
+
+
 def go_menu(chat_id: int, text: Optional[str] = None):
     msg = text or "Главное меню. Выберите действие:"
     set_state(chat_id, "greeting", {})

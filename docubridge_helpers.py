@@ -36,7 +36,7 @@ START_PAYLOAD_ROUTES = {
 
 
 HUB_CB_PREFIX = "hub"
-KNOWN_COMMANDS = {"start", "help", "track", "menu", "reset", "ai", "orders", "order", "status"}
+KNOWN_COMMANDS = {"start", "help", "track", "menu", "reset", "ai", "orders", "order", "status", "stats"}
 BOTFATHER_COMMANDS = [
     ("start", "Главное меню и выбор маршрута"),
     ("help", "Справка: что делает бот и как получить расчёт"),
@@ -189,12 +189,19 @@ BANNED_DOC_WORDS = [
     "паспорт", "passport", "id-карт", "id карт", "айди", "удостоверен",
     "national id", "военн", "военник",
 ]
+CALC_INTENT_WORDS = ("рассчит", "расчет", "расчёт", "цена", "цену", "стоимост", "сколько", "почём", "почем", "тариф")
 STEP_QUESTION_WORDS = ("сколько", "цена", "цену", "стоимост", "стоит", "почём", "почем", "тариф")
 
 
 def is_banned_doc(text: Optional[str]) -> bool:
     low = (text or "").lower()
     return any(b in low for b in BANNED_DOC_WORDS)
+
+
+def is_calc_intent(text: Optional[str]) -> bool:
+    """Greeting-state text that means «покажите цену / рассчитайте»."""
+    low = (text or "").strip().lower()
+    return bool(low) and any(w in low for w in CALC_INTENT_WORDS)
 
 
 def is_step_question(text: Optional[str]) -> bool:
@@ -397,9 +404,22 @@ def parse_int(text: str) -> Optional[int]:
 
 
 def normalize_phone(s: Optional[str]) -> str:
+    """Strip spaces/brackets/dashes/dots and fix common local formats.
+
+    0XXXXXXXXX (UA, 10 digits) -> +380XXXXXXXXX; 380…/375…/7… without + -> +…;
+    8XXXXXXXXXX (RU, 11 digits) -> +7XXXXXXXXXX; 00… -> +…; other +… kept as is.
+    """
     s = re.sub(r"[\s\-().]", "", (s or "").strip())
+    if s.startswith("+"):
+        return s
     if s.startswith("00"):
-        s = "+" + s[2:]
+        return "+" + s[2:]
+    if re.fullmatch(r"0\d{9}", s):
+        return "+38" + s
+    if re.fullmatch(r"8\d{10}", s):
+        return "+7" + s[1:]
+    if re.fullmatch(r"380\d{9}", s) or re.fullmatch(r"375\d{9}", s) or re.fullmatch(r"7\d{10}", s):
+        return "+" + s
     return s
 
 
@@ -408,9 +428,39 @@ def valid_phone(s: str) -> bool:
     return bool(re.fullmatch(r"\+[1-9]\d{7,14}", normalize_phone(s)))
 
 
+NAME_LETTERS = "A-Za-zА-Яа-яЁёІіЇїЄєҐґ"
+NAME_RE = re.compile(r"^[" + NAME_LETTERS + r"'’ʼ`.\-\s]+$")
+
+
 def valid_name(s: str) -> bool:
+    """Letters (RU/UA/Latin incl. і ї є ґ), apostrophes ' ’ ʼ, dot, space, hyphen; ≥ 2 letters."""
     s = (s or "").strip()
-    return bool(re.match(r"^[A-Za-zА-Яа-яЁё\-'\s]{2,}$", s))
+    if not s or not NAME_RE.match(s):
+        return False
+    return len(re.findall(r"[" + NAME_LETTERS + r"]", s)) >= 2
+
+
+def mask_phone(s: Optional[str]) -> str:
+    """'+380501234567' -> '+380…67' (for logs)."""
+    d = re.sub(r"[^\d+]", "", s or "")
+    if len(d) <= 6:
+        return "***"
+    return d[:4] + "…" + d[-2:]
+
+
+def mask_name(s: Optional[str]) -> str:
+    s = (s or "").strip()
+    return (s[0] + "***") if s else ""
+
+
+def mask_for_log(state: Optional[str], text: Optional[str]) -> str:
+    """Hide personal data typed on name/phone steps; keep other answers readable."""
+    t = text or ""
+    if state == "ask_phone" or re.fullmatch(r"\+?[\d\s\-()]{7,}", t.strip()):
+        return mask_phone(t)
+    if state == "ask_name":
+        return mask_name(t)
+    return t[:80]
 
 
 def infer_urgency(text: str) -> Optional[str]:

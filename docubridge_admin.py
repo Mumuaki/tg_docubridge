@@ -156,3 +156,58 @@ def admin_status_button(call):
     bot.answer_callback_query(call.id, msg[:190])
     if call.message:
         bot.send_message(call.message.chat.id, msg)
+
+
+STATE_LABELS_RU = {
+    "greeting": "меню/приветствие",
+    "choose_route": "выбор маршрута",
+    "route_offer": "оффер (не нажал «Рассчитать»)",
+    "ask_doc_type": "тип документа",
+    "ask_volume": "вес",
+    "quote_shown": "цена показана (не нажал «Оформить»)",
+    "ask_from_city": "город отправки",
+    "ask_to_city": "город доставки",
+    "ask_name": "имя",
+    "ask_phone": "телефон",
+    "confirm": "подтверждение",
+    "completed": "заявка оформлена",
+    "await_track": "ввод номера для отслеживания",
+}
+
+STATS_PERIODS = (1, 7, 30)
+
+
+def format_stats(periods, detail) -> str:
+    """periods: list of stats dicts (short lines); detail: stats dict for breakdowns."""
+    if not detail:
+        return "Статистика недоступна: нет подключения к БД."
+    lines = ["📊 DocuBridge — воронка", ""]
+    for st in periods:
+        if not st:
+            continue
+        conv = f"{st['orders'] / st['start_chats'] * 100:.0f}%" if st["start_chats"] else "—"
+        lines.append(
+            f"За {st['days']} дн.: стартов {st['starts']} (чатов {st['start_chats']}), "
+            f"заявок {st['orders']}, конверсия {conv}"
+        )
+    d = detail["days"]
+    lines += ["", f"Старты по меткам ({d} дн.):"]
+    lines += [f"• {p}: {n}" for p, n in detail["by_payload"]] or ["• —"]
+    lines += ["", f"Заявки по маршрутам ({d} дн.):"]
+    lines += [f"• {r}: {n}" for r, n in detail["by_route"]] or ["• —"]
+    lines += ["", f"Где сейчас пользователи (последний шаг, активность за {d} дн.):"]
+    lines += [f"• {STATE_LABELS_RU.get(s, s)}: {n}" for s, n in detail["by_state"]] or ["• —"]
+    lines += ["", "Старты учитываются с момента включения логирования /start."]
+    return "\n".join(lines)
+
+
+@bot.message_handler(commands=["stats"], func=lambda m: is_admin(m.chat.id))
+def admin_stats(message):
+    parts = (message.text or "").split()
+    custom = None
+    if len(parts) > 1 and parts[1].isdigit() and 0 < int(parts[1]) <= 365:
+        custom = int(parts[1])
+    days_list = (custom,) if custom else STATS_PERIODS
+    periods = [get_funnel_stats(d) for d in days_list]
+    detail = periods[-1]
+    bot.send_message(message.chat.id, format_stats(periods, detail))

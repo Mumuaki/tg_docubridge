@@ -130,7 +130,7 @@ class TestHelpFallback(Base):
 
     def test_real_question_uses_ai_with_hint(self):
         h.start(msg("/start")); self.sent.clear()
-        h.any_text(msg("сколько стоит доставка диплома"))
+        h.any_text(msg("какие сроки доставки диплома в Минск"))
         self.assertIn("Ответ AI", self.texts()); self.assertIn("/help", self.texts())
 
     def test_quote_flow_intact(self):
