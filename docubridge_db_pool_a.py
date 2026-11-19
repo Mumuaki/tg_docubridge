@@ -277,6 +277,20 @@ def ensure_tables() -> bool:
               ON shipment_events (ticket, created_at);
             ALTER TABLE shipments
               ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+            -- Google Sheet outbox: synced = row is in the sheet; claimed = lease while exporting
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS sheet_synced_at TIMESTAMPTZ;
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS sheet_claimed_at TIMESTAMPTZ;
+            -- One-off admin broadcasts: one row per (campaign, chat) = never sent twice
+            CREATE TABLE IF NOT EXISTS broadcast_log (
+                campaign TEXT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                segment TEXT,
+                status TEXT NOT NULL DEFAULT 'sending',
+                error TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                sent_at TIMESTAMPTZ,
+                PRIMARY KEY (campaign, chat_id)
+            );
             """
         )
         conn.commit()

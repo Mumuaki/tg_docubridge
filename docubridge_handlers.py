@@ -12,8 +12,10 @@ from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow import *  # noqa: F401,F403
 from docubridge_reminders import start_reminder_thread, reminder_health
+from docubridge_sheets import start_sheets_thread, sheets_health
 import docubridge_admin as _admin  # noqa: F401  (registers admin handlers before catch-all)
 from docubridge_admin import *  # noqa: F401,F403
+import docubridge_broadcast as _broadcast  # noqa: F401  (/broadcast_stuck + its buttons, before catch-all)
 
 # ------------ Handlers ------------
 
@@ -234,6 +236,10 @@ def ensure_started(force: bool = False) -> dict:
             start_reminder_thread()
         except Exception as e:
             print(f"[Startup] reminder thread error: {e}")
+        try:
+            start_sheets_thread()   # Google Sheet check + outbox; off without env
+        except Exception as e:
+            print(f"[Startup] sheets thread error: {e}")
         return startup_status()
     finally:
         _startup_lock.release()
@@ -271,7 +277,7 @@ def health():
     st = startup_status()
     ok = db_ok and rem != "dead" and st["webhook"]
     body = {"ok": ok, "db": db_ok, "reminders": rem, "webhook": st["webhook"],
-            "tables": st["tables"], "pid": os.getpid()}
+            "tables": st["tables"], "sheets": sheets_health(), "pid": os.getpid()}
     return jsonify(body), (200 if ok else 503)
 
 
