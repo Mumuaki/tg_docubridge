@@ -135,6 +135,17 @@ def ensure_tables():
               updated_at TIMESTAMPTZ DEFAULT NOW()
             );
 
+            CREATE TABLE IF NOT EXISTS start_events (
+              id BIGSERIAL PRIMARY KEY,
+              chat_id BIGINT NOT NULL,
+              payload TEXT,
+              username TEXT,
+              created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS start_events_time_idx
+              ON start_events (created_at);
+
             CREATE INDEX IF NOT EXISTS idx_processed_updates_time
               ON processed_updates (processed_at);
 

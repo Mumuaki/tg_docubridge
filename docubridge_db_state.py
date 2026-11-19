@@ -10,54 +10,96 @@ from docubridge_config import DB_URL
 from docubridge_helpers import generate_ticket_candidate
 from docubridge_db_pool import get_conn, return_conn
 
+DB_ERROR_STATE = "__db_error__"
+
+
+def _drop_conn(conn):
+    """Close a broken connection instead of returning it to the pool."""
+    try:
+        from docubridge_db_pool_a import connection_pool
+        if connection_pool:
+            connection_pool.putconn(conn, close=True)
+        else:
+            conn.close()
+    except Exception:
+        pass
+
+
 def get_state(chat_id: int) -> Tuple[str, Dict]:
-    conn = None
-    try:
-        if not DB_URL:
-            return ("greeting", {})
-        conn = get_conn()
-        if not conn:
-            return ("greeting", {})
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT state, data FROM user_state WHERE chat_id = %s", (int(chat_id),))
-        row = cur.fetchone()
-        cur.close()
-        return (row["state"], row["data"] or {}) if row else ("greeting", {})
-    except Exception as e:
-        print(f"[DB] get_state error: {e}")
+    """Return (state, data).
+
+    No DB configured / no row -> ("greeting", {}).
+    DB failure: logged, retried once on a fresh connection; if it still fails
+    returns (DB_ERROR_STATE, {}) so the dialog does NOT silently reset the funnel.
+    """
+    if not DB_URL:
         return ("greeting", {})
-    finally:
-        if conn:
+    last_err = None
+    for attempt in (1, 2):
+        conn = None
+        try:
+            conn = get_conn()
+            if not conn:
+                raise RuntimeError("no DB connection")
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT state, data FROM user_state WHERE chat_id = %s", (int(chat_id),))
+            row = cur.fetchone()
+            cur.close()
             return_conn(conn)
+            conn = None
+            return (row["state"], row["data"] or {}) if row else ("greeting", {})
+        except Exception as e:
+            last_err = e
+            print(f"[DB] get_state error (attempt {attempt}/2, chat {chat_id}): {e}")
+            if conn:
+                _drop_conn(conn)
+                conn = None
+        finally:
+            if conn:
+                return_conn(conn)
+    print(f"[DB] get_state FAILED for chat {chat_id} — state unknown, not resetting: {last_err}")
+    return (DB_ERROR_STATE, {})
 
 
-def set_state(chat_id: int, state: str, data: Optional[Dict] = None):
-    conn = None
-    try:
-        if not DB_URL:
-            return
-        conn = get_conn()
-        if not conn:
-            return
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO user_state (chat_id, state, data, updated_at)
-            VALUES (%s, %s, %s, NOW())
-            ON CONFLICT (chat_id) DO UPDATE
-              SET state = EXCLUDED.state,
-                  data  = COALESCE(EXCLUDED.data, user_state.data),
-                  updated_at = NOW()
-            """,
-            (int(chat_id), state, json.dumps(data or {}, ensure_ascii=False)),
-        )
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        print(f"[DB] set_state error: {e}")
-    finally:
-        if conn:
+def set_state(chat_id: int, state: str, data: Optional[Dict] = None) -> bool:
+    """Upsert state; retried once on a fresh connection. Returns True on success."""
+    print(f"[Funnel] chat={chat_id} state={state}")
+    if not DB_URL:
+        return True
+    payload = json.dumps(data or {}, ensure_ascii=False)
+    for attempt in (1, 2):
+        conn = None
+        try:
+            conn = get_conn()
+            if not conn:
+                raise RuntimeError("no DB connection")
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_state (chat_id, state, data, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (chat_id) DO UPDATE
+                  SET state = EXCLUDED.state,
+                      data  = COALESCE(EXCLUDED.data, user_state.data),
+                      updated_at = NOW()
+                """,
+                (int(chat_id), state, payload),
+            )
+            conn.commit()
+            cur.close()
             return_conn(conn)
+            conn = None
+            return True
+        except Exception as e:
+            print(f"[DB] set_state error (attempt {attempt}/2, chat {chat_id}, state {state}): {e}")
+            if conn:
+                _drop_conn(conn)
+                conn = None
+        finally:
+            if conn:
+                return_conn(conn)
+    print(f"[DB] set_state FAILED for chat {chat_id} (state {state})")
+    return False
 
 
 def update_data(chat_id: int, new_data: Dict):

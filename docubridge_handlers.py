@@ -18,6 +18,12 @@ def start(message):
     parts = (message.text or "").split(maxsplit=1)
     ref = parts[1].strip() if len(parts) > 1 else None
     action = resolve_start_payload(ref)
+    username = getattr(getattr(message, "from_user", None), "username", None)
+    print(
+        f"[Start] chat_id={message.chat.id} payload={ref or '-'} "
+        f"username={('@' + username) if username else '-'} kind={action.get('kind')}"
+    )
+    record_start_event(message.chat.id, ref, username)
 
     if action.get("kind") == "route":
         start_send_flow(
@@ -102,6 +108,10 @@ def contact_shared(message):
     contact = getattr(message, "contact", None)
     phone = getattr(contact, "phone_number", "") or ""
     state, _ = get_state(message.chat.id)
+    print(f"[Funnel] chat={message.chat.id} contact shared in state={state} phone={mask_phone(phone)}")
+    if state == DB_ERROR_STATE:
+        send_db_error(message.chat.id)
+        return
     if state != "ask_phone" or not phone:
         send_fallback(message.chat.id)
         return
@@ -138,9 +148,15 @@ def telegram_webhook():
                 print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
                 return "OK", 200
 
-            mark_update_processed(update_id)
             print(f"[Webhook] Processing update_id: {update_id}")
-            bot.process_new_updates([update])
+            try:
+                bot.process_new_updates([update])
+            except Exception as e:
+                # Not marked as processed: a redelivery of this update will be handled again.
+                print(f"[Webhook] Update {update_id} FAILED (not marked processed): {e}")
+                traceback.print_exc()
+                return "OK", 200
+            mark_update_processed(update_id)
             print(f"[Webhook] Update {update_id} processed successfully")
         else:
             print("[Webhook] Unsupported content-type")
@@ -157,7 +173,9 @@ def ensure_webhook():
             raise SystemExit(1)
         url = f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
         bot.remove_webhook()
-        ok = bot.set_webhook(url=url, drop_pending_updates=True)
+        # Keep updates that queued up while the service was deploying/restarting
+        # (e.g. /start from an ad): they are de-duplicated via processed_updates.
+        ok = bot.set_webhook(url=url, drop_pending_updates=False)
         if ok:
             print(f"✅ Webhook set to: {url}")
         else:

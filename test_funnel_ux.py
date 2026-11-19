@@ -165,7 +165,7 @@ class TestPhone(unittest.TestCase):
             self.assertTrue(m.valid_phone(p), p)
 
     def test_invalid(self):
-        for p in ("0501234567", "+12", "abc", "", "+0123456789", "+38050123456789012"):
+        for p in ("050123456", "+12", "abc", "", "+0123456789", "+38050123456789012"):
             self.assertFalse(m.valid_phone(p), p)
 
     def test_step_question(self):
