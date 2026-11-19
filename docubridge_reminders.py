@@ -41,21 +41,55 @@ def run_reminders_once() -> int:
     return sent
 
 
-def _loop():
-    time.sleep(60)
+_thread_lock = threading.Lock()
+_thread = None
+_thread_pid = None
+_last_tick = 0.0          # heartbeat of the loop (time.time()), for /health
+
+
+def _loop(initial_delay: float = 60.0):
+    global _last_tick
+    _last_tick = time.time()
+    time.sleep(initial_delay)
     while True:
+        _last_tick = time.time()
         try:
             run_reminders_once()
-        except Exception as e:
+        except Exception as e:  # never let the thread die
             print(f"[Remind] loop error: {e}")
+        _last_tick = time.time()
         time.sleep(CHECK_EVERY_S)
 
 
 def start_reminder_thread():
+    """Start the reminder loop — exactly one per process (lock + PID check).
+
+    After a fork the parent's thread does not exist in the child, so a PID change
+    always starts a fresh thread here. Double sends across processes are prevented
+    in the DB by claim_reminder()."""
+    global _thread, _thread_pid
     if not reminders_enabled():
         print("[Remind] disabled (DOCUBRIDGE_REMINDERS=0)")
         return None
-    t = threading.Thread(target=_loop, name="docubridge-reminders", daemon=True)
-    t.start()
-    print(f"[Remind] thread started: after {REMIND_AFTER_MIN} min idle, max age {REMIND_MAX_AGE_H} h, once per chat")
+    pid = os.getpid()
+    with _thread_lock:
+        if _thread is not None and _thread_pid == pid and _thread.is_alive():
+            return _thread
+        t = threading.Thread(target=_loop, name="docubridge-reminders", daemon=True)
+        t.start()
+        _thread, _thread_pid = t, pid
+    print(f"[Remind] thread started (pid {pid}): after {REMIND_AFTER_MIN} min idle, "
+          f"max age {REMIND_MAX_AGE_H} h, once per chat")
     return t
+
+
+def reminder_health() -> str:
+    """'disabled' | 'alive' | 'dead' (not started in this process, died, or hung)."""
+    if not reminders_enabled():
+        return "disabled"
+    t = _thread
+    if t is None or _thread_pid != os.getpid() or not t.is_alive():
+        return "dead"
+    if time.time() - _last_tick > CHECK_EVERY_S * 2 + 120:
+        return "dead"
+    return "alive"

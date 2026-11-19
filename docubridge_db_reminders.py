@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
-"""DocuBridge: persistence for one-time «продолжить оформление» reminders."""
+"""DocuBridge: persistence for one-time «продолжить оформление» reminders.
+
+Double-send protection works across threads AND processes: claim_reminder() is an
+atomic INSERT … ON CONFLICT DO NOTHING RETURNING done before the message is sent.
+"""
 from typing import Dict, List, Sequence
 
 import psycopg2.extras
 
 from docubridge_config import DB_URL
-from docubridge_db_pool_a import get_conn, return_conn
+from docubridge_db_pool_a import get_conn, return_conn, db_run
+
+
+def _run(label, fn, default=None, retry=True):
+    return db_run(label, fn, default, retry, getconn=lambda: get_conn(), putconn=lambda c: return_conn(c))
 
 
 def find_reminder_candidates(states: Sequence[str], idle_minutes: int, max_age_hours: int,
@@ -14,11 +22,8 @@ def find_reminder_candidates(states: Sequence[str], idle_minutes: int, max_age_h
     never reminded before and without any order."""
     if not DB_URL:
         return []
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return []
+
+    def _do(conn):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
@@ -37,23 +42,19 @@ def find_reminder_candidates(states: Sequence[str], idle_minutes: int, max_age_h
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
         return rows
-    except Exception as e:
-        print(f"[DB] find_reminder_candidates error: {e}")
-        return []
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return _run("find_reminder_candidates", _do, default=[])
 
 
 def claim_reminder(chat_id: int, state: str) -> bool:
-    """Atomically mark the chat as reminded. True only for the first claim ever."""
+    """Atomically mark the chat as reminded. True only for the first claim ever.
+
+    No automatic retry: if the connection drops around COMMIT we cannot know whether
+    the claim landed, and «not sent» is safer than «sent twice»."""
     if not DB_URL:
         return False
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return False
+
+    def _do(conn):
         cur = conn.cursor()
         cur.execute(
             """
@@ -67,9 +68,5 @@ def claim_reminder(chat_id: int, state: str) -> bool:
         conn.commit()
         cur.close()
         return ok
-    except Exception as e:
-        print(f"[DB] claim_reminder error: {e}")
-        return False
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return bool(_run("claim_reminder", _do, default=False, retry=False))
