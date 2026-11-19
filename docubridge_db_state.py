@@ -8,21 +8,22 @@ import psycopg2.extras
 
 from docubridge_config import DB_URL
 from docubridge_helpers import generate_ticket_candidate
-from docubridge_db_pool import get_conn, return_conn
+from docubridge_db_pool import get_conn, return_conn, db_run, discard_conn, RETRYABLE_DB_ERRORS
 
 DB_ERROR_STATE = "__db_error__"
 
 
 def _drop_conn(conn):
     """Close a broken connection instead of returning it to the pool."""
-    try:
-        from docubridge_db_pool_a import connection_pool
-        if connection_pool:
-            connection_pool.putconn(conn, close=True)
-        else:
-            conn.close()
-    except Exception:
-        pass
+    discard_conn(conn)
+
+
+def _run(label, fn, default=None, retry=True):
+    return db_run(label, fn, default, retry, getconn=lambda: get_conn(), putconn=lambda c: return_conn(c))
+
+
+class AmbiguousCommit(Exception):
+    """Connection lost during COMMIT: the write may or may not have landed — never auto-retry."""
 
 
 def get_state(chat_id: int) -> Tuple[str, Dict]:
@@ -103,29 +104,20 @@ def set_state(chat_id: int, state: str, data: Optional[Dict] = None) -> bool:
 
 
 def update_data(chat_id: int, new_data: Dict):
-    conn = None
-    try:
-        if not DB_URL:
-            return
-        conn = get_conn()
-        if not conn:
-            return
+    if not DB_URL:
+        return
+
+    def _do(conn):
         cur = conn.cursor()
         cur.execute(
-            """
-            UPDATE user_state
-               SET data = %s, updated_at = NOW()
-             WHERE chat_id = %s
-            """,
+            "UPDATE user_state SET data = %s, updated_at = NOW() WHERE chat_id = %s",
             (json.dumps(new_data, ensure_ascii=False), int(chat_id)),
         )
         conn.commit()
         cur.close()
-    except Exception as e:
-        print(f"[DB] update_data error: {e}")
-    finally:
-        if conn:
-            return_conn(conn)
+        return True
+
+    _run("update_data", _do)
 
 
 def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
@@ -136,13 +128,7 @@ def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
         payload["ticket"] = ticket
         return ticket
 
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            print("[DB] create_shipment: no DB connection")
-            return None
-
+    def _do(conn):
         cur = conn.cursor()
         ticket = None
         for _ in range(12):
@@ -160,48 +146,34 @@ def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
             except psycopg2.IntegrityError:
                 conn.rollback()
                 continue
-
         if not ticket:
             cur.close()
             return None
-
-        payload = dict(payload)
-        payload["ticket"] = ticket
+        lead = dict(payload)
+        lead["ticket"] = ticket
         cur.execute(
-            """
-            INSERT INTO leads (chat_id, payload, ticket)
-            VALUES (%s, %s, %s)
-            """,
-            (int(chat_id), psycopg2.extras.Json(payload), ticket),
+            "INSERT INTO leads (chat_id, payload, ticket) VALUES (%s, %s, %s)",
+            (int(chat_id), psycopg2.extras.Json(lead), ticket),
         )
         cur.execute(
             "INSERT INTO shipment_events (ticket, status, comment) VALUES (%s, 'accepted', NULL)",
             (ticket,),
         )
-        conn.commit()
+        try:
+            conn.commit()
+        except RETRYABLE_DB_ERRORS as e:
+            raise AmbiguousCommit(f"commit of {ticket} lost: {e}")
         cur.close()
         return ticket
-    except Exception as e:
-        print(f"[DB] create_shipment error: {e}")
-        try:
-            if conn:
-                conn.rollback()
-        except Exception:
-            pass
-        return None
-    finally:
-        if conn:
-            return_conn(conn)
+
+    # Errors before COMMIT roll back server-side → one retry on a fresh connection is safe.
+    return _run("create_shipment", _do, default=None)
 
 
 def get_shipment_by_ticket(ticket: str) -> Optional[Dict]:
     if not DB_URL:
         return None
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return None
+    def _do(conn):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
@@ -214,9 +186,5 @@ def get_shipment_by_ticket(ticket: str) -> Optional[Dict]:
         row = cur.fetchone()
         cur.close()
         return dict(row) if row else None
-    except Exception as e:
-        print(f"[DB] get_shipment_by_ticket error: {e}")
-        return None
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return _run("get_shipment_by_ticket", _do, default=None)

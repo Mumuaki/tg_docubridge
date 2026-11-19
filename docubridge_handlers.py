@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """DocuBridge Telegram handlers / webhook — Phase 2."""
 import json
+import os
+import threading
+import time
 import traceback
 from telebot.types import Update
-from flask import request
+from flask import request, jsonify
 
 from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow import *  # noqa: F401,F403
+from docubridge_reminders import start_reminder_thread, reminder_health
 import docubridge_admin as _admin  # noqa: F401  (registers admin handlers before catch-all)
 from docubridge_admin import *  # noqa: F401,F403
 
@@ -167,38 +171,112 @@ def telegram_webhook():
     return "OK", 200
 
 
-def ensure_webhook():
+def ensure_webhook() -> bool:
+    """Idempotent setWebhook (same URL is simply re-set). Never raises: False on failure."""
     try:
         if not WEBHOOK_BASE:
-            print("❌ ERROR: WEBHOOK_BASE не задан — бот не будет работать!")
-            raise SystemExit(1)
+            print("❌ ERROR: WEBHOOK_BASE не задан — бот не будет получать сообщения!")
+            return False
         url = f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
-        bot.remove_webhook()
         # Keep updates that queued up while the service was deploying/restarting
         # (e.g. /start from an ad): they are de-duplicated via processed_updates.
         ok = bot.set_webhook(url=url, drop_pending_updates=False)
         if ok:
-            print(f"✅ Webhook set to: {url}")
-        else:
-            print("❌ ERROR: set_webhook returned False")
-            raise SystemExit(1)
-    except SystemExit:
-        raise
+            print(f"✅ Webhook set to: {WEBHOOK_BASE}/webhook/<secret>")
+            return True
+        print("❌ ERROR: set_webhook returned False")
     except Exception as e:
         print(f"❌ [Webhook] set error: {e}")
-        raise SystemExit(1)
+    return False
+
+
+# ------------ Startup (lazy, per process, fork-safe) ------------
+# Nothing is opened at import time: with gunicorn --preload the module is imported
+# in the master before fork, so DB sockets / threads created there would be shared
+# with (or missing in) the worker. Startup runs in the serving process instead:
+# from gunicorn's post_worker_init hook and, as a fallback, on the first request.
+
+STARTUP_RETRY_S = 30
+_startup_lock = threading.Lock()
+_startup = {"pid": None, "tables": False, "webhook": False, "last_try": 0.0}
+
+
+def startup_status() -> dict:
+    same = _startup["pid"] == os.getpid()
+    return {"tables": same and _startup["tables"], "webhook": same and _startup["webhook"]}
+
+
+def ensure_started(force: bool = False) -> dict:
+    """Idempotent: tables + webhook + reminder thread, once per process.
+    Failed parts are retried on a later call (at most every STARTUP_RETRY_S)."""
+    pid = os.getpid()
+    if (_startup["pid"] == pid and _startup["tables"] and _startup["webhook"]
+            and reminder_health() != "dead"):
+        return startup_status()
+    if not _startup_lock.acquire(timeout=30 if force else 0):
+        return startup_status()  # another thread is starting right now
+    try:
+        if _startup["pid"] != pid:
+            _startup.update(pid=pid, tables=False, webhook=False, last_try=0.0)
+        now = time.time()
+        if not force and now - _startup["last_try"] < STARTUP_RETRY_S:
+            return startup_status()
+        _startup["last_try"] = now
+        print(f"[Startup] pid {pid}: tables={_startup['tables']} webhook={_startup['webhook']}")
+        if not _startup["tables"]:
+            try:
+                _startup["tables"] = bool(ensure_tables())
+            except Exception as e:
+                print(f"[Startup] ensure_tables error: {e}")
+        if not _startup["webhook"]:
+            _startup["webhook"] = ensure_webhook()
+        try:
+            start_reminder_thread()
+        except Exception as e:
+            print(f"[Startup] reminder thread error: {e}")
+        return startup_status()
+    finally:
+        _startup_lock.release()
+
+
+@app.before_request
+def _lazy_startup():
+    if SKIP_STARTUP:
+        return None
+    try:
+        ensure_started()
+    except Exception as e:  # never block a request because of startup
+        print(f"[Startup] error: {e}")
+    return None
+
+
+def db_ping() -> bool:
+    if not DB_URL:
+        return False
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        ok = cur.fetchone() is not None
+        cur.close()
+        return ok
+
+    return bool(db_run("health", _do, default=False))
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    db_ok = db_ping()
+    rem = reminder_health()
+    st = startup_status()
+    ok = db_ok and rem != "dead" and st["webhook"]
+    body = {"ok": ok, "db": db_ok, "reminders": rem, "webhook": st["webhook"],
+            "tables": st["tables"], "pid": os.getpid()}
+    return jsonify(body), (200 if ok else 503)
 
 
 # ------------ Entrypoint ------------
-if not SKIP_STARTUP:
-    init_db_pool()
-    ensure_tables()
-    ensure_webhook()
-    from docubridge_reminders import start_reminder_thread
-    start_reminder_thread()
-
 if __name__ == "__main__":
-    if SKIP_STARTUP:
-        init_db_pool()
-        ensure_tables()
+    if not SKIP_STARTUP:
+        ensure_started(force=True)
     app.run(host="0.0.0.0", port=PORT, debug=False)

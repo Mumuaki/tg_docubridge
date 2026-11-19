@@ -3,19 +3,19 @@
 from typing import Optional, Dict, List, Tuple
 
 from docubridge_config import DB_URL
-from docubridge_db_pool_a import get_conn, return_conn
+from docubridge_db_pool_a import get_conn, return_conn, db_run
+
+
+def _run(label, fn, default=None, retry=True):
+    return db_run(label, fn, default, retry, getconn=lambda: get_conn(), putconn=lambda c: return_conn(c))
 
 
 def record_start_event(chat_id: int, payload: Optional[str], username: Optional[str]) -> None:
     """Persist one /start (deep-link payload + optional @username). Never raises."""
     if not DB_URL:
         return
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            print("[DB] record_start_event: no DB connection")
-            return
+
+    def _do(conn):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO start_events (chat_id, payload, username) VALUES (%s, %s, %s)",
@@ -23,11 +23,9 @@ def record_start_event(chat_id: int, payload: Optional[str], username: Optional[
         )
         conn.commit()
         cur.close()
-    except Exception as e:
-        print(f"[DB] record_start_event error: {e}")
-    finally:
-        if conn:
-            return_conn(conn)
+        return True
+
+    _run("record_start_event", _do)
 
 
 def _rows(cur, sql: str, args: Tuple) -> List[Tuple]:
@@ -39,11 +37,7 @@ def get_funnel_stats(days: int) -> Optional[Dict]:
     """Aggregates for the last `days` days; None if DB unavailable."""
     if not DB_URL:
         return None
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return None
+    def _do(conn):
         cur = conn.cursor()
         since = "NOW() - (%s * INTERVAL '1 day')"
         d = int(days)
@@ -97,9 +91,5 @@ def get_funnel_stats(days: int) -> Optional[Dict]:
             "by_route": [(r, int(n)) for r, n in by_route],
             "by_state": [(s, int(n)) for s, n in by_state],
         }
-    except Exception as e:
-        print(f"[DB] get_funnel_stats error: {e}")
-        return None
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return _run("get_funnel_stats", _do, default=None)

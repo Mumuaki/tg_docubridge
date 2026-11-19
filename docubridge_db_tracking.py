@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
-"""DocuBridge tracking persistence: admin lists, status updates, events."""
+"""DocuBridge tracking persistence: admin lists, status updates, events (db_run, 1 retry)."""
 from typing import Optional, Dict, List
 
 import psycopg2
 import psycopg2.extras
 
 from docubridge_config import DB_URL
-from docubridge_db_pool_a import get_conn, return_conn
+from docubridge_db_pool_a import get_conn, return_conn, db_run
+
+
+def _run(label, fn, default=None, retry=True):
+    return db_run(label, fn, default, retry, getconn=lambda: get_conn(), putconn=lambda c: return_conn(c))
 
 
 def list_recent_shipments(limit: int = 20) -> List[Dict]:
     if not DB_URL:
         return []
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return []
+
+    def _do(conn):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
@@ -30,23 +31,16 @@ def list_recent_shipments(limit: int = 20) -> List[Dict]:
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
         return rows
-    except Exception as e:
-        print(f"[DB] list_recent_shipments error: {e}")
-        return []
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return _run("list_recent_shipments", _do, default=[])
 
 
 def update_shipment_status(ticket: str, status: str, comment: Optional[str] = None) -> Optional[Dict]:
-    """UPDATE status/updated_at + insert event. Returns updated row or None."""
+    """UPDATE status/updated_at + insert event (one transaction). Returns updated row or None."""
     if not DB_URL:
         return None
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return None
+
+    def _do(conn):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
@@ -68,27 +62,15 @@ def update_shipment_status(ticket: str, status: str, comment: Optional[str] = No
         conn.commit()
         cur.close()
         return dict(row)
-    except Exception as e:
-        print(f"[DB] update_shipment_status error: {e}")
-        try:
-            if conn:
-                conn.rollback()
-        except Exception:
-            pass
-        return None
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return _run("update_shipment_status", _do, default=None)
 
 
 def get_shipment_events(ticket: str) -> List[Dict]:
     if not DB_URL:
         return []
-    conn = None
-    try:
-        conn = get_conn()
-        if not conn:
-            return []
+
+    def _do(conn):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
@@ -102,9 +84,5 @@ def get_shipment_events(ticket: str) -> List[Dict]:
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
         return rows
-    except Exception as e:
-        print(f"[DB] get_shipment_events error: {e}")
-        return []
-    finally:
-        if conn:
-            return_conn(conn)
+
+    return _run("get_shipment_events", _do, default=[])
