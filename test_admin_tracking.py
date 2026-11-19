@@ -265,13 +265,17 @@ class TestSheets(unittest.TestCase):
             t.join(2)  # no exception propagates
 
     def test_update_status_cell(self):
+        # PR #12: one batch_update (Статус, Обновлено, Комментарий) instead of 3 update_cell.
         ws = mock.MagicMock()
-        ws.find.return_value = SimpleNamespace(row=7)
+        ws.col_values.return_value = ["Ticket", "DB1", "DB2", "DB3", "DB4", "DB5", "DB1234"]
         with mock.patch.dict(os.environ, {"GOOGLE_SA_JSON": "{}", "SHEET_ID": "abc"}), \
              mock.patch.object(sh, "_get_worksheet", return_value=ws):
             sh.update_status_async("DB1234", "доставлено", "ok").join(2)
-        ws.update_cell.assert_any_call(7, sh.STATUS_COL, "доставлено")
-        ws.update_cell.assert_any_call(7, sh.COMMENT_COL, "ok")
+        ws.update_cell.assert_not_called()
+        (req,), kw = ws.batch_update.call_args
+        self.assertEqual(req[0]["range"], "O7:Q7")
+        self.assertEqual(req[0]["values"][0][0], "доставлено")
+        self.assertEqual(req[0]["values"][0][2], "ok")
 
 
 if __name__ == "__main__":

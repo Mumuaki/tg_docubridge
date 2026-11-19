@@ -34,3 +34,19 @@ Do **not** rely on `OPENAI_API_KEY`; Phase 2 uses `XAI_API_KEY` only.
 cd /workspace/tg_docubridge
 DOCUBRIDGE_SKIP_STARTUP=1 python test_phase2.py
 ```
+
+## PR #12 — Google Sheet outbox + /broadcast_stuck
+
+Render env (Dashboard → Environment), then redeploy:
+- `GOOGLE_SA_JSON` — service-account key: whole JSON **or** base64 of it (auto-detected).
+- `SHEET_ID` — key from the sheet URL `https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit`.
+- Share the sheet with the key's `client_email` as **Editor**.
+- Optional: `DOCUBRIDGE_SHEETS_SYNC_S` (default 60), `DOCUBRIDGE_BROADCAST_CAMPAIGN` (default `stuck_2026_11`).
+
+Logs after deploy: `[Sheets] outbox thread started (pid N)`, then `[Sheets] OK: лист «…»`
+(or `[Sheets] ERROR: … — reason`), then `[Sheets] outbox: exported K` (old orders backfilled).
+`/health` → `"sheets": "off" | "pending" | "ok" | "error"` (does not affect `ok`).
+
+Broadcast: admin sends `/broadcast_stuck` → dry run + preview (to admin only) → button
+«Отправить N …» (single use, 10 min). Report arrives when done. Re-running never resends
+to the same chat for the same campaign (`broadcast_log`).
