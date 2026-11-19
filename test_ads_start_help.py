@@ -16,6 +16,7 @@ import docubridge_flow_steps as fs  # noqa: E402
 import docubridge_flow_dialog as fd  # noqa: E402
 import docubridge_flow_dialog_pre as fpre  # noqa: E402
 import docubridge_flow_dialog_post as fpost  # noqa: E402
+import docubridge_funnel as fun  # noqa: E402
 
 CHAT = 555
 
@@ -39,7 +40,7 @@ class Base(unittest.TestCase):
             self.sent.append((text, reply_markup))
 
         self.patches = []
-        for mod in (h, fs, fd, fpre, fpost):
+        for mod in (h, fs, fd, fpre, fpost, fun):
             for name, val in (("set_state", set_state), ("get_state", get_state),
                               ("save_message", lambda *a, **k: None)):
                 if hasattr(mod, name):
@@ -48,6 +49,8 @@ class Base(unittest.TestCase):
         p = mock.patch.object(m.bot, "answer_callback_query", return_value=None); p.start(); self.patches.append(p)
         self.ai = mock.patch.object(fpost, "ai_reply", return_value="Ответ AI"); self.ai_m = self.ai.start()
         self.patches.append(self.ai)
+        self.fai = mock.patch.object(fun, "ai_reply", return_value="Ответ AI"); self.fai_m = self.fai.start()
+        self.patches.append(self.fai)
 
     def tearDown(self):
         for p in self.patches:

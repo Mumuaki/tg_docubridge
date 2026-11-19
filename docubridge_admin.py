@@ -170,6 +170,7 @@ STATE_LABELS_RU = {
     "ask_name": "имя",
     "ask_phone": "телефон",
     "confirm": "подтверждение",
+    "edit_choose": "исправление заявки",
     "completed": "заявка оформлена",
     "await_track": "ввод номера для отслеживания",
 }
@@ -185,10 +186,13 @@ def format_stats(periods, detail) -> str:
     for st in periods:
         if not st:
             continue
-        conv = f"{st['orders'] / st['start_chats'] * 100:.0f}%" if st["start_chats"] else "—"
+        tracked = st.get("orders_tracked", st["orders"])
+        conv = f"{min(tracked / st['start_chats'], 1) * 100:.0f}%" if st["start_chats"] else "—"
+        extra = f" (из них после старта с меткой/логом: {tracked})" if tracked != st["orders"] else ""
+        rem = f", напоминаний {st['reminders']}" if st.get("reminders") else ""
         lines.append(
             f"За {st['days']} дн.: стартов {st['starts']} (чатов {st['start_chats']}), "
-            f"заявок {st['orders']}, конверсия {conv}"
+            f"заявок {st['orders']}{extra}, конверсия {conv}{rem}"
         )
     d = detail["days"]
     lines += ["", f"Старты по меткам ({d} дн.):"]
@@ -197,7 +201,8 @@ def format_stats(periods, detail) -> str:
     lines += [f"• {r}: {n}" for r, n in detail["by_route"]] or ["• —"]
     lines += ["", f"Где сейчас пользователи (последний шаг, активность за {d} дн.):"]
     lines += [f"• {STATE_LABELS_RU.get(s, s)}: {n}" for s, n in detail["by_state"]] or ["• —"]
-    lines += ["", "Старты учитываются с момента включения логирования /start."]
+    lines += ["", "Старты учитываются с момента включения логирования /start; "
+                  "конверсия = заявки чатов с залогированным стартом / чаты со стартом."]
     return "\n".join(lines)
 
 
