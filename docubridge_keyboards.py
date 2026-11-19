@@ -52,30 +52,53 @@ def offer_keyboard() -> ReplyKeyboardMarkup:
     return kb
 
 
+def _nav_row(kb: ReplyKeyboardMarkup, back: bool = True) -> ReplyKeyboardMarkup:
+    """«← Назад» + «Связаться с менеджером» on every funnel step."""
+    if back:
+        kb.row(KeyboardButton(BTN_BACK), KeyboardButton(MENU_MANAGER))
+    else:
+        kb.row(KeyboardButton(MENU_MANAGER))
+    return kb
+
+
 def doc_type_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
     kb.add(*[KeyboardButton(t) for t in DOC_TYPE_BUTTONS])
-    kb.add(KeyboardButton(BTN_MENU))
-    return kb
+    return _nav_row(kb)
 
 
 def volume_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
     kb.add(*[KeyboardButton(t) for t in VOLUME_PRESETS])
-    kb.add(KeyboardButton(BTN_MENU))
-    return kb
+    return _nav_row(kb)
+
+
+def city_keyboard(country: Optional[str]) -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
+    cities = POPULAR_CITIES.get(normalize_country(country or "") or "", [])
+    if cities:
+        kb.add(*[KeyboardButton(c) for c in cities])
+    kb.row(KeyboardButton(BTN_OTHER_CITY))
+    return _nav_row(kb)
+
+
+def name_keyboard(tg_name: Optional[str] = None) -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    if tg_name:
+        kb.row(KeyboardButton(NAME_BTN_PREFIX + tg_name))
+    return _nav_row(kb)
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(KeyboardButton(BTN_SHARE_CONTACT, request_contact=True))
-    kb.add(KeyboardButton(BTN_MENU))
-    return kb
+    return _nav_row(kb)
 
 
 def quote_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(KeyboardButton(BTN_APPLY))
+    _nav_row(kb)
     kb.add(KeyboardButton(BTN_MENU))
     return kb
 
@@ -83,7 +106,15 @@ def quote_keyboard() -> ReplyKeyboardMarkup:
 def confirm_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(KeyboardButton(BTN_CONFIRM))
-    kb.add(KeyboardButton(BTN_CANCEL))
+    kb.row(KeyboardButton(BTN_EDIT), KeyboardButton(BTN_CANCEL))
+    kb.row(KeyboardButton(MENU_MANAGER))
+    return kb
+
+
+def edit_keyboard() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
+    kb.add(*[KeyboardButton(t) for t in EDIT_FIELDS])
+    kb.row(KeyboardButton(BTN_EDIT_DONE))
     return kb
 
 
@@ -141,7 +172,7 @@ def format_confirm_summary(data: Dict) -> str:
     q = compute_quote(data)
     price = f"€{q['price_eur']}" if q["price_eur"] is not None else "по согласованию"
     return (
-        "Проверьте заявку:\n\n"
+        "Проверьте заявку (последний шаг):\n\n"
         f"Роль: {role_label(data.get('role') or 'sender')}\n"
         f"Маршрут: {route_line(data)}\n"
         f"Документ: {data.get('doc_type')}\n"
@@ -149,7 +180,8 @@ def format_confirm_summary(data: Dict) -> str:
         f"Оценка: {price}; срок {q.get('eta_working') or '—'} раб. дней\n"
         f"Имя: {data.get('name')}\n"
         f"Телефон: {data.get('phone')}\n\n"
-        "Нажмите «Подтвердить» или «Отмена»."
+        "Всё верно? Нажмите «Подтвердить». "
+        "Если нужно поменять город, имя, телефон или документ — «✏️ Исправить»."
     )
 
 

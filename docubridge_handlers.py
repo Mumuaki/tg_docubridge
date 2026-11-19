@@ -117,7 +117,7 @@ def contact_shared(message):
         return
     if not phone.startswith("+"):
         phone = "+" + phone.lstrip("0")
-    handle_answer(message.chat.id, phone)
+    handle_answer(message.chat.id, phone, tg_name=profile_name(getattr(message, "from_user", None)))
 
 
 @bot.message_handler(func=lambda m: True)
@@ -125,7 +125,8 @@ def any_text(message):
     if is_unknown_command(message.text):
         send_fallback(message.chat.id)
         return
-    handle_answer(message.chat.id, message.text or "")
+    handle_answer(message.chat.id, message.text or "",
+                  tg_name=profile_name(getattr(message, "from_user", None)))
 
 
 # ------------ Webhook ------------
@@ -193,6 +194,8 @@ if not SKIP_STARTUP:
     init_db_pool()
     ensure_tables()
     ensure_webhook()
+    from docubridge_reminders import start_reminder_thread
+    start_reminder_thread()
 
 if __name__ == "__main__":
     if SKIP_STARTUP:

@@ -19,7 +19,7 @@ def init_db_pool():
     if not DB_URL:
         return
     try:
-        connection_pool = pool.SimpleConnectionPool(
+        connection_pool = pool.ThreadedConnectionPool(
             minconn=1,
             maxconn=10,
             dsn=DB_URL,
@@ -141,6 +141,12 @@ def ensure_tables():
               payload TEXT,
               username TEXT,
               created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS funnel_reminders (
+              chat_id BIGINT PRIMARY KEY,
+              state TEXT,
+              reminded_at TIMESTAMPTZ DEFAULT NOW()
             );
 
             CREATE INDEX IF NOT EXISTS start_events_time_idx

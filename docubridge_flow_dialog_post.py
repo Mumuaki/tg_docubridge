@@ -6,82 +6,25 @@ from telebot.types import ReplyKeyboardRemove
 from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow_steps import *  # noqa: F401,F403
+from docubridge_funnel import *  # noqa: F401,F403
+from docubridge_funnel import _off_step_answer
 from docubridge_sheets import export_shipment_async
 
 
 def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
     s = (text or "").strip()
 
-    if state == "quote_shown":
-        if s == BTN_APPLY or s.lower() in {"оформить", "заявка", "да"}:
-            set_state(chat_id, "ask_from_city", data)
-            bot.send_message(
-                chat_id,
-                f"Оформляем заявку ({data.get('from_country')} → {data.get('to_country')}).\n"
-                "Из какого города отправляем?",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return
-        if s == BTN_MENU:
-            go_menu(chat_id)
-            return
-        bot.send_message(
-            chat_id,
-            "Нажмите «Оформить заявку» или «В меню».",
-            reply_markup=quote_keyboard(),
-        )
-        return
-
-    if state == "ask_name":
-        if is_step_question(s):
-            bot.send_message(chat_id, step_question_answer() + "\n\nКак к вам обращаться?")
-            return
-        if not valid_name(s):
-            print(f"[Funnel] chat={chat_id} name rejected: {mask_name(s)!r} (len {len(s)})")
-            bot.send_message(
-                chat_id,
-                "Введите имя/фамилию (буквы, пробелы и дефисы; не короче 2 символов).",
-            )
-            return
-        data["name"] = s
-        set_state(chat_id, "ask_phone", data)
-        bot.send_message(
-            chat_id,
-            "Контактный телефон: нажмите «Поделиться контактом» или введите номер "
-            "в международном формате (+код страны и номер, например +380…, +36…, +421…).",
-            reply_markup=phone_keyboard(),
-        )
-        return
-
-    if state == "ask_phone":
-        if s == BTN_MENU:
-            go_menu(chat_id)
-            return
-        phone = normalize_phone(s)
-        if not valid_phone(phone):
-            print(f"[Funnel] chat={chat_id} phone rejected: {mask_phone(s)!r} (digits {sum(c.isdigit() for c in s)})")
-            bot.send_message(
-                chat_id,
-                "Нужен номер в формате +код страны и номер (8–15 цифр), "
-                "или нажмите «Поделиться контактом».",
-                reply_markup=phone_keyboard(),
-            )
-            return
-        data["phone"] = phone
-        set_state(chat_id, "confirm", data)
-        msg = format_confirm_summary(data)
-        save_message(chat_id, None, msg)
-        bot.send_message(chat_id, msg, reply_markup=confirm_keyboard())
-        return
-
     if state == "confirm":
         if s == BTN_CANCEL or s.lower() in {"отмена", "нет"}:
             go_menu(chat_id, "Заявка отменена. Вы в главном меню.")
             return
         if s != BTN_CONFIRM and s.lower() not in {"подтвердить", "да", "ok", "ок"}:
+            if is_step_question(s):
+                prompt_step(chat_id, "confirm", data, prefix=_off_step_answer(s))
+                return
             bot.send_message(
                 chat_id,
-                "Нажмите «Подтвердить» или «Отмена».",
+                "Нажмите «Подтвердить», «✏️ Исправить» или «Отмена».",
                 reply_markup=confirm_keyboard(),
             )
             return
@@ -110,9 +53,12 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         thanks = (
             f"✅ Заявка оформлена.\n"
             f"Номер отправления: {ticket}\n\n"
-            f"Маршрут: {route_line(data)}\n"
-            f"Мы свяжемся с вами по телефону {data.get('phone')}.\n"
-            f"Статус можно проверить: «Отследить отправление» или /track."
+            f"Маршрут: {route_line(data)}\n\n"
+            "Что дальше:\n"
+            f"1. Менеджер свяжется с вами по телефону {data.get('phone')}, "
+            "чтобы согласовать детали и передачу документов.\n"
+            f"2. Статус — кнопка «Отследить отправление» или /track и номер {ticket}.\n"
+            f"Вопросы — {MANAGER_CONTACT} (укажите номер {ticket})."
         )
         save_message(chat_id, s, thanks)
         bot.send_message(chat_id, thanks, reply_markup=main_menu())
