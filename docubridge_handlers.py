@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """DocuBridge Telegram handlers / webhook — Phase 2."""
+import hmac
 import json
 import os
+import statistics
 import threading
 import time
 import traceback
+from typing import Optional
 from telebot.types import Update
 from flask import request, jsonify
+from urllib.parse import urlsplit
 
 from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
@@ -142,29 +146,52 @@ def index():
     return "OK", 200
 
 
-@app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
-def telegram_webhook():
+def _update_chat_id(update):
+    """chat id of a message / callback update, or None."""
+    for attr in ("message", "edited_message"):
+        m = getattr(update, attr, None)
+        if m is not None and getattr(m, "chat", None) is not None:
+            return m.chat.id
+    cq = getattr(update, "callback_query", None)
+    if cq is not None and getattr(cq, "message", None) is not None:
+        return cq.message.chat.id
+    return None
+
+
+def _handle_update_json(json_data) -> None:
+    """Dedup (+ state prefetch in the same query) → process → mark processed.
+    The mark is queued for the background writer; it is queued BEFORE the 200
+    is returned, so a redelivery (only on non-2xx) can never miss it."""
+    update = Update.de_json(json_data)
+    update_id = update.update_id
+    print(f"[Webhook] Received update_id: {update_id}")
+    chat_id = _update_chat_id(update)
+    pre = check_update_and_state(update_id, chat_id) if chat_id is not None else None
+    processed = pre[0] if pre is not None else is_update_processed(update_id)
+    if processed:
+        print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
+        return
+    print(f"[Webhook] Processing update_id: {update_id}")
+    try:
+        if pre is not None:
+            prefetch_state(chat_id, *pre[1])
+        try:
+            bot.process_new_updates([update])
+        except Exception as e:
+            # Not marked as processed: a redelivery of this update will be handled again.
+            print(f"[Webhook] Update {update_id} FAILED (not marked processed): {e}")
+            traceback.print_exc()
+            return
+    finally:
+        clear_prefetch()
+    mark_update_processed(update_id)
+    print(f"[Webhook] Update {update_id} processed successfully")
+
+
+def _webhook_response():
     try:
         if request.headers.get("content-type") == "application/json":
-            json_data = json.loads(request.get_data().decode("utf-8"))
-            update = Update.de_json(json_data)
-            update_id = update.update_id
-            print(f"[Webhook] Received update_id: {update_id}")
-
-            if is_update_processed(update_id):
-                print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
-                return "OK", 200
-
-            print(f"[Webhook] Processing update_id: {update_id}")
-            try:
-                bot.process_new_updates([update])
-            except Exception as e:
-                # Not marked as processed: a redelivery of this update will be handled again.
-                print(f"[Webhook] Update {update_id} FAILED (not marked processed): {e}")
-                traceback.print_exc()
-                return "OK", 200
-            mark_update_processed(update_id)
-            print(f"[Webhook] Update {update_id} processed successfully")
+            _handle_update_json(json.loads(request.get_data().decode("utf-8")))
         else:
             print("[Webhook] Unsupported content-type")
     except Exception as e:
@@ -173,18 +200,43 @@ def telegram_webhook():
     return "OK", 200
 
 
+@app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
+def telegram_webhook():
+    """Legacy route (secret in the path). Kept during the switch to /webhook."""
+    return _webhook_response()
+
+
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook_token():
+    """New route: Telegram's X-Telegram-Bot-Api-Secret-Token header must match
+    WEBHOOK_SECRET_TOKEN. Not configured → every request is rejected (fail closed)."""
+    token = WEBHOOK_SECRET_TOKEN
+    got = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not token or not hmac.compare_digest(got.encode("utf-8"), token.encode("utf-8")):
+        print(f"[Webhook] /webhook rejected (403): token {'missing' if not got else 'mismatch'}"
+              f"{'' if token else ', WEBHOOK_SECRET_TOKEN not configured'}")
+        return "Forbidden", 403
+    return _webhook_response()
+
+
 def ensure_webhook() -> bool:
     """Idempotent setWebhook (same URL is simply re-set). Never raises: False on failure."""
     try:
         if not WEBHOOK_BASE:
             print("❌ ERROR: WEBHOOK_BASE не задан — бот не будет получать сообщения!")
             return False
-        url = f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
         # Keep updates that queued up while the service was deploying/restarting
         # (e.g. /start from an ad): they are de-duplicated via processed_updates.
-        ok = bot.set_webhook(url=url, drop_pending_updates=False)
+        if WEBHOOK_SECRET_TOKEN:
+            ok = bot.set_webhook(url=f"{WEBHOOK_BASE}/webhook", secret_token=WEBHOOK_SECRET_TOKEN,
+                                 drop_pending_updates=False)
+            shown = f"{WEBHOOK_BASE}/webhook (secret_token header)"
+        else:
+            ok = bot.set_webhook(url=f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}",
+                                 drop_pending_updates=False)
+            shown = f"{WEBHOOK_BASE}/webhook/<secret>"
         if ok:
-            print(f"✅ Webhook set to: {WEBHOOK_BASE}/webhook/<secret>")
+            print(f"✅ Webhook set to: {shown}")
             return True
         print("❌ ERROR: set_webhook returned False")
     except Exception as e:
@@ -201,6 +253,49 @@ def ensure_webhook() -> bool:
 STARTUP_RETRY_S = 30
 _startup_lock = threading.Lock()
 _startup = {"pid": None, "tables": False, "webhook": False, "last_try": 0.0}
+
+
+def db_host() -> str:
+    """Host name of DATABASE_URL only — never user, password or query."""
+    if not DB_URL:
+        return "-"
+    try:
+        if "://" in DB_URL:
+            return urlsplit(DB_URL).hostname or "?"
+        for part in DB_URL.split():
+            if part.startswith("host="):
+                return part.split("=", 1)[1].strip("'\"")
+    except Exception:
+        pass
+    return "?"
+
+
+def db_diagnostics(n: int = 5) -> Optional[float]:
+    """Log the DB host and the median of n× SELECT 1 (one round trip each) in ms."""
+    if not DB_URL:
+        return None
+    conn = get_conn()
+    if not conn:
+        print(f"[DB] host={db_host()} — no connection for latency check")
+        return None
+    times = []
+    try:
+        cur = conn.cursor()
+        for _ in range(n):
+            t0 = time.perf_counter()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            times.append((time.perf_counter() - t0) * 1000)
+        cur.close()
+    except Exception as e:
+        print(f"[DB] latency check failed: {e}")
+        discard_conn(conn)
+        return None
+    return_conn(conn)
+    med = statistics.median(times)
+    print(f"[DB] host={db_host()} SELECT 1 ×{n}: median {med:.0f} ms "
+          f"(min {min(times):.0f}, max {max(times):.0f})")
+    return med
 
 
 def startup_status() -> dict:
@@ -230,6 +325,11 @@ def ensure_started(force: bool = False) -> dict:
                 _startup["tables"] = bool(ensure_tables())
             except Exception as e:
                 print(f"[Startup] ensure_tables error: {e}")
+            if _startup["tables"]:
+                try:
+                    db_diagnostics()
+                except Exception as e:
+                    print(f"[Startup] db diagnostics error: {e}")
         if not _startup["webhook"]:
             _startup["webhook"] = ensure_webhook()
         try:

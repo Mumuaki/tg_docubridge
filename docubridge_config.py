@@ -20,6 +20,9 @@ if not DB_URL and not SKIP_STARTUP:
 
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")
+# New-style webhook auth: Telegram sends it in X-Telegram-Bot-Api-Secret-Token
+# (POST /webhook, nothing secret in the URL / access logs). Empty = not configured.
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", "5000"))
 
 XAI_API_KEY = os.getenv("XAI_API_KEY")

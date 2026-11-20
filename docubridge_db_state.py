@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """DocuBridge DB state/shipments — Phase 2."""
+import copy
 import json
+import threading
 from typing import Optional, Dict, Tuple
 
 import psycopg2
@@ -9,6 +11,7 @@ import psycopg2.extras
 from docubridge_config import DB_URL
 from docubridge_helpers import generate_ticket_candidate
 from docubridge_db_pool import get_conn, return_conn, db_run, discard_conn, RETRYABLE_DB_ERRORS
+from docubridge_db_pool_a import begin_transaction
 
 DB_ERROR_STATE = "__db_error__"
 
@@ -26,6 +29,55 @@ class AmbiguousCommit(Exception):
     """Connection lost during COMMIT: the write may or may not have landed — never auto-retry."""
 
 
+# ------------ per-update prefetch (dedup + state in ONE query) ------------
+# The webhook reads «already processed?» and the chat's state together; handlers
+# in the same thread then get the state from this cache instead of another query.
+# set_state()/update_data() keep the cache in sync; it is cleared after each update.
+_tl = threading.local()
+
+
+def _cache() -> Optional[Dict]:
+    return getattr(_tl, "states", None)
+
+
+def prefetch_state(chat_id: int, state: str, data: Optional[Dict]) -> None:
+    c = _cache()
+    if c is None:
+        c = _tl.states = {}
+    c[int(chat_id)] = (state, copy.deepcopy(data or {}))
+
+
+def clear_prefetch() -> None:
+    _tl.states = None
+
+
+def check_update_and_state(update_id: int, chat_id: int) -> Optional[Tuple[bool, Tuple[str, Dict]]]:
+    """(processed, (state, data)) in one round trip; None on DB error / no DB
+    (caller falls back to is_update_processed + get_state)."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT EXISTS (SELECT 1 FROM processed_updates WHERE update_id = %s) AS processed,
+                   us.state AS state, us.data AS data
+              FROM (SELECT 1) AS one
+              LEFT JOIN user_state us ON us.chat_id = %s
+            """,
+            (int(update_id), int(chat_id)),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if row is None:
+            return None
+        st = (row["state"], row["data"] or {}) if row.get("state") else ("greeting", {})
+        return bool(row["processed"]), st
+
+    return _run("check_update_and_state", _do, default=None)
+
+
 def get_state(chat_id: int) -> Tuple[str, Dict]:
     """Return (state, data).
 
@@ -35,6 +87,10 @@ def get_state(chat_id: int) -> Tuple[str, Dict]:
     """
     if not DB_URL:
         return ("greeting", {})
+    c = _cache()
+    if c is not None and int(chat_id) in c:
+        st, data = c[int(chat_id)]
+        return st, copy.deepcopy(data)
     last_err = None
     for attempt in (1, 2):
         conn = None
@@ -90,6 +146,9 @@ def set_state(chat_id: int, state: str, data: Optional[Dict] = None) -> bool:
             cur.close()
             return_conn(conn)
             conn = None
+            c = _cache()
+            if c is not None:   # mirror what was written (data or {} — see payload above)
+                c[int(chat_id)] = (state, copy.deepcopy(data or {}))
             return True
         except Exception as e:
             print(f"[DB] set_state error (attempt {attempt}/2, chat {chat_id}, state {state}): {e}")
@@ -117,7 +176,10 @@ def update_data(chat_id: int, new_data: Dict):
         cur.close()
         return True
 
-    _run("update_data", _do)
+    if _run("update_data", _do):
+        c = _cache()
+        if c is not None and int(chat_id) in c:
+            c[int(chat_id)] = (c[int(chat_id)][0], copy.deepcopy(new_data))
 
 
 def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
@@ -129,6 +191,7 @@ def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
         return ticket
 
     def _do(conn):
+        begin_transaction(conn)   # shipment + lead + event: all or nothing
         cur = conn.cursor()
         ticket = None
         for _ in range(12):

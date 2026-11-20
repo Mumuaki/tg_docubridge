@@ -66,15 +66,21 @@ class TestForkSafePool(PoolBase):
         ctor.assert_not_called(); conn.assert_not_called()
 
     def test_get_conn_discards_dead_and_returns_live(self):
+        # PR #13: only connections idle > DB_PING_IDLE_S are pinged (one SELECT 1, autocommit);
+        # statement_timeout comes from the connect options, not SET LOCAL per query.
         bad, good = dead_conn(), good_conn()
+        for c in (bad, good):
+            c.autocommit = True
+            pa._last_used[id(c)] = pa.time.monotonic() - pa.DB_PING_IDLE_S - 1
         fake_pool = mock.MagicMock(); fake_pool.getconn.side_effect = [bad, good]
         with mock.patch.object(pa.pool, "ThreadedConnectionPool", return_value=fake_pool):
             c = pa.get_conn()
         self.assertIs(c, good)
         fake_pool.putconn.assert_called_once_with(bad, close=True)
         sqls = [call.args[0] for call in good.cursor.return_value.execute.call_args_list]
-        self.assertIn("SET LOCAL statement_timeout = %s", sqls)
-        self.assertIn("SELECT 1", sqls)
+        self.assertNotIn("SET LOCAL statement_timeout = %s", sqls)
+        self.assertEqual(sqls, ["SELECT 1"])
+        pa._last_used.pop(id(good), None)
 
     def test_connect_kwargs_timeouts_keepalives(self):
         kw = pa._connect_kwargs()

@@ -4,6 +4,7 @@ from typing import Optional
 
 from docubridge_config import DB_URL
 from docubridge_db_pool_a import get_conn, return_conn, db_run
+from docubridge_db_writer import submit
 
 
 def _run(label, fn, default=None, retry=True):
@@ -38,7 +39,10 @@ def mark_update_processed(update_id: int):
         cur.close()
         return True
 
-    _run("mark_update_processed", _do)
+    # Background: the dedup CHECK stays synchronous (before processing) and the 200
+    # answer is sent only after this is queued, so Telegram never redelivers an update
+    # whose mark is still in the queue.
+    submit("mark_update_processed", lambda: _run("mark_update_processed", _do))
 
 
 def cleanup_old_updates():
@@ -71,4 +75,4 @@ def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str
         cur.close()
         return True
 
-    _run("save_message", _do)
+    submit("save_message", lambda: _run("save_message", _do))
