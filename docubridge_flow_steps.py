@@ -142,10 +142,8 @@ def contact_manager(chat_id: int):
 
 
 def _fmt_dt(dt) -> str:
-    try:
-        return dt.strftime("%d.%m.%Y %H:%M")
-    except Exception:
-        return str(dt) if dt else ""
+    """dd.mm.yyyy HH:MM in Kyiv time (DB timestamps are timezone-aware)."""
+    return fmt_local(dt)
 
 
 def format_track_message(row: Dict, events) -> str:
@@ -176,4 +174,5 @@ def format_track_message(row: Dict, events) -> str:
         if i <= cur_idx and comments.get(st):
             line += f" ({comments[st]})"
         lines.append(line)
+    lines.append(f"Время — {DISPLAY_TZ_LABEL}.")
     return "\n".join(lines)

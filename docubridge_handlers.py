@@ -20,6 +20,9 @@ from docubridge_sheets import start_sheets_thread, sheets_health
 import docubridge_admin as _admin  # noqa: F401  (registers admin handlers before catch-all)
 from docubridge_admin import *  # noqa: F401,F403
 import docubridge_broadcast as _broadcast  # noqa: F401  (/broadcast_stuck + its buttons, before catch-all)
+import docubridge_notify as _notify  # noqa: F401  (/chatid, /digest, my_chat_member, before catch-all)
+from docubridge_notify import start_notify_thread, notify_health, update_allowed
+from docubridge_db_notify import ensure_notify_tables
 
 # ------------ Handlers ------------
 
@@ -112,9 +115,16 @@ def ai_ping(message):
     bot.send_message(message.chat.id, f"AI: {reply}")
 
 
+def _private(message) -> bool:
+    """Client funnel only in private chats (groups: lead cards / status buttons only)."""
+    return getattr(getattr(message, "chat", None), "type", "private") == "private"
+
+
 @bot.message_handler(content_types=["contact"])
 def contact_shared(message):
     """Telegram request_contact button on the phone step."""
+    if not _private(message):
+        return
     contact = getattr(message, "contact", None)
     phone = getattr(contact, "phone_number", "") or ""
     state, _ = get_state(message.chat.id)
@@ -132,6 +142,8 @@ def contact_shared(message):
 
 @bot.message_handler(func=lambda m: True)
 def any_text(message):
+    if not _private(message):
+        return
     if is_unknown_command(message.text):
         send_fallback(message.chat.id)
         return
@@ -170,6 +182,10 @@ def _handle_update_json(json_data) -> None:
     processed = pre[0] if pre is not None else is_update_processed(update_id)
     if processed:
         print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
+        return
+    if not update_allowed(update):
+        print(f"[Webhook] Update {update_id} ignored (group/channel, not a status button or admin command)")
+        mark_update_processed(update_id)
         return
     print(f"[Webhook] Processing update_id: {update_id}")
     try:
@@ -308,13 +324,14 @@ def ensure_started(force: bool = False) -> dict:
     Failed parts are retried on a later call (at most every STARTUP_RETRY_S)."""
     pid = os.getpid()
     if (_startup["pid"] == pid and _startup["tables"] and _startup["webhook"]
-            and reminder_health() != "dead"):
+            and reminder_health() != "dead"
+            and (not DB_URL or (_startup.get("notify") and notify_health() != "dead"))):
         return startup_status()
     if not _startup_lock.acquire(timeout=30 if force else 0):
         return startup_status()  # another thread is starting right now
     try:
         if _startup["pid"] != pid:
-            _startup.update(pid=pid, tables=False, webhook=False, last_try=0.0)
+            _startup.update(pid=pid, tables=False, webhook=False, notify=False, last_try=0.0)
         now = time.time()
         if not force and now - _startup["last_try"] < STARTUP_RETRY_S:
             return startup_status()
@@ -340,6 +357,16 @@ def ensure_started(force: bool = False) -> dict:
             start_sheets_thread()   # Google Sheet check + outbox; off without env
         except Exception as e:
             print(f"[Startup] sheets thread error: {e}")
+        if _startup["tables"] and not _startup.get("notify"):
+            try:
+                _startup["notify"] = ensure_notify_tables()
+            except Exception as e:
+                print(f"[Startup] notify tables error: {e}")
+        try:
+            if _startup.get("notify"):
+                start_notify_thread()   # lead notify outbox + daily digest
+        except Exception as e:
+            print(f"[Startup] notify thread error: {e}")
         return startup_status()
     finally:
         _startup_lock.release()
@@ -377,7 +404,8 @@ def health():
     st = startup_status()
     ok = db_ok and rem != "dead" and st["webhook"]
     body = {"ok": ok, "db": db_ok, "reminders": rem, "webhook": st["webhook"],
-            "tables": st["tables"], "sheets": sheets_health(), "pid": os.getpid()}
+            "tables": st["tables"], "sheets": sheets_health(), "notify": notify_health(),
+            "pid": os.getpid()}
     return jsonify(body), (200 if ok else 503)
 
 

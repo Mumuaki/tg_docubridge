@@ -26,7 +26,7 @@ def _p(row: Dict) -> Dict:
 def format_orders_list(rows) -> str:
     if not rows:
         return "Заявок пока нет."
-    lines = [f"Последние заявки ({len(rows)}):", ""]
+    lines = [f"Последние заявки ({len(rows)}), время — {DISPLAY_TZ_LABEL}:", ""]
     for r in rows:
         p = _p(r)
         st = normalize_status(r.get("status")) or r.get("status")
@@ -44,8 +44,8 @@ def format_order_card(row: Dict, events) -> str:
     lines = [
         f"Заявка {row.get('ticket')}",
         f"Chat ID: {row.get('chat_id')}",
-        f"Создана: {_fmt_dt(row.get('created_at'))}",
-        f"Обновлена: {_fmt_dt(row.get('updated_at'))}",
+        f"Создана: {_fmt_dt(row.get('created_at'))} ({DISPLAY_TZ_LABEL})",
+        f"Обновлена: {_fmt_dt(row.get('updated_at'))} ({DISPLAY_TZ_LABEL})",
         "",
         f"Роль: {role_label(p.get('role') or 'sender')}",
         f"Маршрут: {route_line(p)}",
@@ -142,9 +142,17 @@ def admin_status(message):
     bot.send_message(message.chat.id, msg if ok else msg + "\n\n" + STATUS_USAGE)
 
 
+def can_press_status(user_id) -> bool:
+    """By the presser's user id (not the chat): admin + LEADS_MANAGER_IDS."""
+    from docubridge_notify import can_manage
+    return is_admin(user_id) or can_manage(user_id)
+
+
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith(STATUS_CB_PREFIX + ":"))
 def admin_status_button(call):
-    if not is_admin(getattr(call.from_user, "id", None)):
+    uid = getattr(call.from_user, "id", None)
+    if not can_press_status(uid):
+        print(f"[ADMIN status] denied for user {uid}")
         bot.answer_callback_query(call.id, "Нет доступа")
         return
     try:
@@ -155,6 +163,10 @@ def admin_status_button(call):
     ok, msg = apply_status_change(ticket, status)
     bot.answer_callback_query(call.id, msg[:190])
     if call.message:
+        if getattr(call.message.chat, "type", "private") != "private":
+            u = call.from_user
+            who = ("@" + u.username) if getattr(u, "username", None) else (getattr(u, "first_name", None) or str(uid))
+            msg = f"{msg} — {who}"
         bot.send_message(call.message.chat.id, msg)
 
 

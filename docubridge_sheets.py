@@ -15,6 +15,9 @@ Reliability:
   * No duplicate rows: a DB lease (sheet_claimed_at) is taken before exporting and the
     ticket column is checked right before append_row.
   * Admin test orders (chat id == ADMIN_CHAT_ID) are exported too, marked «тест».
+  * Column 18 «Уведомление» (да / нет / ошибка) is appended at the END only: header
+    written in R1 if R1 is empty and A1:Q1 look like ours; any other content in R1 →
+    the column is left alone. SHEET_NOTIFY_COL=0 switches it off.
 """
 import base64
 import binascii
@@ -40,6 +43,10 @@ UPDATED_COL = SHEET_HEADER.index("Обновлено (UTC)") + 1
 COMMENT_COL = SHEET_HEADER.index("Комментарий") + 1
 ROLE_IDX = SHEET_HEADER.index("Роль")
 COMMENT_IDX = SHEET_HEADER.index("Комментарий")
+
+NOTIFY_HEADER = "Уведомление"
+NOTIFY_COL = len(SHEET_HEADER) + 1           # 18 = column R, after the existing 17
+NOTIFY_VALUES = {"sent": "да", "failed": "ошибка"}   # anything else → «нет»
 
 TEST_MARK = "тест"
 SHEETS_TIMEOUT = (5, 15)          # (connect, read) seconds for every Google API call
@@ -153,6 +160,8 @@ def _set_health(ok: bool, exc=None):
 def with_retry(label: str, fn):
     """Run fn(ws) with a fresh-on-error worksheet; retries only transient errors."""
     global _ws_cache
+    if _ws_cache is None:
+        _notify_col_ok.clear()
     last = None
     for attempt in range(SHEETS_ATTEMPTS):
         try:
@@ -262,13 +271,79 @@ def _ticket_row(ws, ticket: str) -> Optional[int]:
     return None
 
 
+def notify_col_enabled() -> bool:
+    return (os.getenv("SHEET_NOTIFY_COL", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+_notify_col_ok = {}      # id(worksheet) → bool
+
+
+def _notify_col_ready(ws) -> bool:
+    """True if column R is ours («Уведомление»); writes the header once if R1 is empty.
+    Never touches a sheet whose layout differs (any error → column skipped)."""
+    if not notify_col_enabled():
+        return False
+    key = id(ws)
+    if key in _notify_col_ok:
+        return _notify_col_ok[key]
+    ok = False
+    try:
+        row1 = ws.row_values(1)
+        if not isinstance(row1, list):
+            raise TypeError("row_values(1) is not a list")
+        head = [str(v).strip() for v in row1]
+        if len(head) > len(SHEET_HEADER):
+            ok = head[len(SHEET_HEADER)] == NOTIFY_HEADER
+            if not ok:
+                print(f"[Sheets] column R1 is «{head[len(SHEET_HEADER)][:30]}» — «{NOTIFY_HEADER}» column skipped")
+        elif head and head[0] == SHEET_HEADER[0]:
+            cols = getattr(ws, "col_count", NOTIFY_COL)
+            if isinstance(cols, int) and cols < NOTIFY_COL:
+                ws.add_cols(NOTIFY_COL - cols)
+            ws.update_cell(1, NOTIFY_COL, NOTIFY_HEADER)
+            print(f"[Sheets] header «{NOTIFY_HEADER}» added to column R")
+            ok = True
+    except Exception as e:
+        print(f"[Sheets] «{NOTIFY_HEADER}» column skipped: {_short(e)}")
+        ok = False
+    _notify_col_ok[key] = ok
+    return ok
+
+
+def notify_value(ticket: str) -> str:
+    try:
+        from docubridge_db_notify import get_notify_status
+        return NOTIFY_VALUES.get(get_notify_status(ticket) or "", "нет")
+    except Exception:
+        return "нет"
+
+
 def _append_if_missing(row: list) -> str:
     def _do(ws):
         if _ticket_row(ws, row[0]):
             return "exists"
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        out = list(row)
+        if len(out) == len(SHEET_HEADER) and _notify_col_ready(ws):
+            out.append(notify_value(out[0]))
+        ws.append_row(out, value_input_option="USER_ENTERED")
         return "appended"
     return with_retry(f"append {row[0]}", _do)
+
+
+def _update_notify(ticket: str, value: str):
+    def _do(ws):
+        if not _notify_col_ready(ws):
+            return None
+        r = _ticket_row(ws, ticket)
+        if not r:
+            return None        # not exported yet: the export reads the value from the DB
+        ws.update_cell(r, NOTIFY_COL, value)
+        return r
+    try:
+        if with_retry(f"notify {ticket}", _do):
+            print(f"[Sheets] {ticket} «{NOTIFY_HEADER}» = {value}")
+    except Exception as e:
+        print(f"[Sheets] notify mark skipped: {_short(e)}")
 
 
 def sync_shipment(sh: Dict) -> bool:
@@ -368,6 +443,16 @@ def export_shipment_async(chat_id: int, payload: Dict, price_eur: Optional[int] 
         return _spawn(_export_new, chat_id, dict(payload or {}), price_eur)
     except Exception as e:
         print(f"[Sheets] export skipped: {e}")
+        return None
+
+
+def update_notify_async(ticket: str, value: str):
+    if not sheets_enabled() or not notify_col_enabled():
+        return None
+    try:
+        return _spawn(_update_notify, ticket, value)
+    except Exception as e:
+        print(f"[Sheets] notify mark skipped: {e}")
         return None
 
 

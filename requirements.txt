@@ -6,3 +6,4 @@ openai==2.6.0
 gunicorn==21.2.0
 gspread==6.2.1
 google-auth==2.62.0
+tzdata==2026.6

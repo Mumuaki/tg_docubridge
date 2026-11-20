@@ -86,3 +86,55 @@ Rollback: remove `WEBHOOK_SECRET_TOKEN` → next start calls `set_webhook` with 
 
 Optional env: `DB_PING_IDLE_S` (60), `DOCUBRIDGE_ASYNC_WRITES` (1),
 `DOCUBRIDGE_WRITE_QUEUE_MAX` (1000), `DOCUBRIDGE_FLUSH_TIMEOUT_S` (10).
+
+## PR — lead notifications: group, outbox, e-mail, daily digest
+
+Every part is switched by env (no code change). Defaults = safe: without new env the
+card goes to ADMIN_CHAT_ID as before, but through the outbox with retries.
+
+| Feature | Env | Default |
+|---|---|---|
+| Lead group | `LEADS_CHAT_ID` (negative id) | empty → `ADMIN_CHAT_ID` |
+| Who may press status buttons in the group | `LEADS_MANAGER_IDS` (user ids, comma) | admin only |
+| Admin test orders → group with «🧪 ТЕСТ» | `NOTIFY_TEST_LEADS=0` to skip | on (only if `LEADS_CHAT_ID`) |
+| Outbox with retries | `NOTIFY_OUTBOX=0` → old one-shot send | on |
+| Loop period / attempts | `NOTIFY_LOOP_S` / `NOTIFY_MAX_ATTEMPTS` | 60 s / 10 |
+| E-mail copy (Resend, HTTPS) | `RESEND_API_KEY`, `LEADS_EMAIL_TO`, opt. `EMAIL_FROM` | off |
+| E-mail copy (SMTP, paid Render only) | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `LEADS_EMAIL_TO`, opt. `SMTP_FROM` | off |
+| Force e-mail off | `NOTIFY_EMAIL=0` | — |
+| Daily digest | `DIGEST_ENABLED=0` to stop; `DIGEST_HOUR`, `DIGEST_TZ` | on, 09, Europe/Budapest |
+| Sheet column R «Уведомление» | `SHEET_NOTIFY_COL=0` to skip | on |
+
+Render free blocks outbound SMTP ports 25/465/587 (render.com/docs/free) → use Resend.
+Resend without an own domain: `from` = `onboarding@resend.dev`, and it delivers only to the
+e-mail of the Resend account owner (so `LEADS_EMAIL_TO` = that address).
+
+### After deploy (no env change)
+1. Logs: `[NOTIFY] notify_log created; N existing orders marked legacy (not sent)` (first start only),
+   `[NOTIFY] thread started … telegram → ADMIN_CHAT_ID; outbox on; email off; digest 09:00 Europe/Budapest`.
+2. The digest for today arrives right away if it is after 09:00 Budapest (once per day; `/digest` = now, any time).
+3. Real order → `[NOTIFY] sent DBxxxx tg msg=…`. Admin test order without `LEADS_CHAT_ID` → `skip (test mode)` as before.
+4. `/health` has `"notify": "alive"`.
+
+### Lead group
+1. Create a Telegram group, add @islogix_bot (and managers). The bot DMs the admin:
+   «Бот добавлен в группу «…», id -100…» (or send `/chatid` in the group as admin).
+2. Render → Environment → add `LEADS_CHAT_ID` = that id (merge, triggers deploy).
+   Optional `LEADS_MANAGER_IDS` = managers' Telegram user ids. A manager who presses a status button
+   without rights gets «Нет доступа»; the log line `[ADMIN status] denied for user N` shows the id to add.
+3. Admin test order → card «🧪 ТЕСТ …» in the group; press a status button: works for admin/managers, «Нет доступа» for others.
+4. Group messages never start the client funnel (`[Webhook] Update … ignored (group/channel …)`).
+5. If the group is upgraded to a supergroup, the bot follows the new id once and DMs the admin to update `LEADS_CHAT_ID`.
+
+### E-mail (Resend)
+1. resend.com → sign up with the address that should receive leads → API Keys → create (Sending access).
+2. Render env: `RESEND_API_KEY`, `LEADS_EMAIL_TO` (= that address). Real order → `[NOTIFY] sent DBxxxx email id=… via resend`.
+
+### Off switches
+`DIGEST_ENABLED=0`, `NOTIFY_EMAIL=0`, `NOTIFY_TEST_LEADS=0`, `NOTIFY_OUTBOX=0`, `SHEET_NOTIFY_COL=0`, remove `LEADS_CHAT_ID`.
+
+### Times
+`/track`, `/order`, `/orders`, cards and digest show Kyiv time (label «Киев»); the Google Sheet stays in UTC.
+
+### Local tests with a real Postgres (optional)
+`DOCUBRIDGE_TEST_PG=postgresql://user@localhost:5432/test_db pytest -q test_notify.py` — drops/creates tables in that DB.
