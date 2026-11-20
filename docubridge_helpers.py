@@ -546,3 +546,35 @@ def parse_volume(text: str) -> Tuple[Optional[int], Optional[int], Optional[str]
         return None, None, "Вес должен быть больше 0."
 
     return pages, weight, None
+
+
+# ------------ Local time for people (Kyiv); Sheets stay in UTC ------------
+
+DISPLAY_TZ_NAME = "Europe/Kyiv"
+DISPLAY_TZ_LABEL = "Киев"
+
+
+def _display_tz():
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(DISPLAY_TZ_NAME)
+    except Exception:            # tzdata missing: Europe/Kiev is the legacy alias
+        return ZoneInfo("Europe/Kiev")
+
+
+def to_local(dt):
+    """Aware datetime → Kyiv time. Naive values are returned unchanged (unknown zone)."""
+    if dt is None or getattr(dt, "tzinfo", None) is None:
+        return dt
+    return dt.astimezone(_display_tz())
+
+
+def fmt_local(dt, fmt: str = "%d.%m.%Y %H:%M", label: bool = False) -> str:
+    """Kyiv-time string for /track, /order, notifications; '' for None."""
+    if not dt:
+        return ""
+    try:
+        s = to_local(dt).strftime(fmt)
+    except Exception:
+        return str(dt)
+    return f"{s} ({DISPLAY_TZ_LABEL})" if label else s

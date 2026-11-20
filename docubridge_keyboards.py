@@ -204,50 +204,10 @@ def status_inline_keyboard(ticket: str) -> InlineKeyboardMarkup:
 
 
 def notify_admin_lead(source_chat_id: int, payload: Dict):
-    """Manager card — plain text to avoid Markdown parse breaks."""
-    if not ADMIN_CHAT_ID:
-        print("[ADMIN] ADMIN_CHAT_ID не задан — уведомление не отправлено")
-        return
-    if ADMIN_CHAT_ID == source_chat_id:
-        print("[ADMIN] ADMIN_CHAT_ID == user chat — skip (test mode)")
-        return
-    try:
-        q = compute_quote(payload)
-        price_line = (
-            f"Оценка: €{q['price_eur']} (до {q['threshold_g']} г)"
-            if q["price_eur"] is not None
-            else "Оценка: по согласованию"
-        )
-        eta_line = (
-            f"Срок: ориентировочно {q['eta_working']} рабочих дней"
-            if q.get("eta_working")
-            else "Срок: требует подтверждения"
-        )
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        ref = payload.get("ref") or payload.get("start_payload") or "—"
-        lines = [
-            "Новый лид DocuBridge",
-            f"Ticket: {payload.get('ticket', '—')}",
-            f"Chat ID: {source_chat_id}",
-            f"Time: {ts}",
-            f"Source/ref: {ref}",
-            "",
-            f"Роль: {role_label(payload.get('role') or 'sender')}",
-            f"Маршрут: {route_line(payload)}",
-            f"Тип документа: {payload.get('doc_type', '—')}",
-            f"Объём: листов {payload.get('pages_a4', '—')}, вес ≈ {payload.get('weight_grams', 0)} г",
-            f"Срочность: {payload.get('urgency', '—')}",
-            price_line,
-            eta_line,
-            "",
-            f"Имя: {payload.get('name', '—')}",
-            f"Телефон: {payload.get('phone', '—')}",
-        ]
-        ticket = payload.get("ticket")
-        markup = status_inline_keyboard(ticket) if ticket else None
-        bot.send_message(ADMIN_CHAT_ID, "\n".join(lines), reply_markup=markup)
-    except Exception as e:
-        print(f"[ADMIN notify] error: {e}")
+    """New-lead card → LEADS_CHAT_ID or ADMIN_CHAT_ID (+ e-mail), via the notify outbox.
+    See docubridge_notify; never raises, never delays the client's reply in outbox mode."""
+    from docubridge_notify import notify_new_lead
+    return notify_new_lead(source_chat_id, payload, admin_override=ADMIN_CHAT_ID)
 
 
 def notify_admin_order_failed(source_chat_id: int, payload: Dict):
@@ -264,6 +224,7 @@ def notify_admin_order_failed(source_chat_id: int, payload: Dict):
             f"Телефон: {payload.get('phone', '—')}",
             "Проверьте БД и свяжитесь с клиентом.",
         ]
-        bot.send_message(ADMIN_CHAT_ID, "\n".join(lines))
+        import docubridge_notify_cfg as ncfg
+        bot.send_message(ncfg.notify_target(ADMIN_CHAT_ID), "\n".join(lines))
     except Exception as e:
         print(f"[ADMIN notify failed-order] error: {e}")
