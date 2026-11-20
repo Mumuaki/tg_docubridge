@@ -4,6 +4,7 @@ from typing import Optional, Dict, List, Tuple
 
 from docubridge_config import DB_URL
 from docubridge_db_pool_a import get_conn, return_conn, db_run
+from docubridge_db_writer import submit
 
 
 def _run(label, fn, default=None, retry=True):
@@ -25,7 +26,7 @@ def record_start_event(chat_id: int, payload: Optional[str], username: Optional[
         cur.close()
         return True
 
-    _run("record_start_event", _do)
+    submit("record_start_event", lambda: _run("record_start_event", _do))
 
 
 def _rows(cur, sql: str, args: Tuple) -> List[Tuple]:

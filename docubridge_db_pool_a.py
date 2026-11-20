@@ -5,14 +5,24 @@
   that uses it and re-created if the PID changes (gunicorn fork / preload):
   connections inherited from a parent process are never used or closed
   (closing would also kill the parent's socket) — they are parked.
-* Every connection is pre-pinged (SELECT 1) before use; dead ones are discarded.
-* db_run(): one automatic retry on a fresh connection for
-  OperationalError / InterfaceError (SSL closed, server restart, network blip).
-* connect_timeout + keepalives for the external Postgres; statement_timeout is
-  applied per transaction with SET LOCAL (works behind pgbouncer/poolers too).
+* Idle connections are KEPT in the pool (up to DB_POOL_MAX) and reused; before
+  this every returned connection was closed and each query paid a full
+  TCP + TLS + auth handshake.
+* Round trips: connections run in AUTOCOMMIT — a single statement costs one
+  round trip (no implicit BEGIN / COMMIT / ROLLBACK). Multi-statement writes that
+  must be atomic call begin_transaction(conn) and commit explicitly; the
+  connection is switched back to autocommit when it is returned to the pool.
+* statement_timeout is set once per connection at connect time
+  (options=-c statement_timeout=…); if a pooler rejects startup options we
+  reconnect without them and run one session-level SET per new connection.
+* Pre-ping (SELECT 1) only for a connection idle > DB_PING_IDLE_S (60 s);
+  dead ones are discarded. A connection that dies within the idle window fails
+  the statement with OperationalError → db_run() retries once on a fresh one.
+* connect_timeout + keepalives for the external Postgres.
 """
 import os
 import threading
+import time
 from typing import Any, Callable, Optional
 
 import psycopg2
@@ -24,16 +34,19 @@ from docubridge_config import DB_URL
 DB_CONNECT_TIMEOUT_S = int(os.getenv("DB_CONNECT_TIMEOUT", "10") or 10)
 DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "15000") or 15000)
 DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "5") or 5)
+DB_PING_IDLE_S = float(os.getenv("DB_PING_IDLE_S", "60") or 60)
 RETRYABLE_DB_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
 
 _lock = threading.RLock()
 connection_pool = None      # pool of the current process (kept name for compatibility)
 _pool_pid: Optional[int] = None
 _parked_pools = []          # pools inherited from a parent process: never touched again
+_last_used = {}             # id(conn) -> time.monotonic() when returned to the pool
+_use_startup_options = True # False after a pooler rejected «options»
 
 
 def _connect_kwargs() -> dict:
-    return dict(
+    kw = dict(
         dsn=DB_URL,
         connect_timeout=DB_CONNECT_TIMEOUT_S,
         keepalives=1,
@@ -42,6 +55,14 @@ def _connect_kwargs() -> dict:
         keepalives_count=5,
         application_name="docubridge",
     )
+    if _use_startup_options:
+        kw["options"] = f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS}"
+    return kw
+
+
+def _options_rejected(exc) -> bool:
+    msg = str(exc).lower()
+    return "options" in msg and ("unsupported" in msg or "startup parameter" in msg or "not supported" in msg)
 
 
 def _current_pool():
@@ -59,6 +80,11 @@ def _current_pool():
             connection_pool = None
         try:
             connection_pool = pool.ThreadedConnectionPool(0, DB_POOL_MAX, **_connect_kwargs())
+            # minconn=0 keeps startup lazy (no connect here), but psycopg2's pool CLOSES
+            # every returned connection while len(idle) >= minconn — with 0 that meant
+            # a brand-new TCP+TLS+auth handshake for every single query. Keep up to
+            # DB_POOL_MAX idle connections instead (minconn is only read in putconn).
+            connection_pool.minconn = DB_POOL_MAX
             _pool_pid = pid
             print(f"[DB] Connection pool created (pid {pid}, max {DB_POOL_MAX})")
         except Exception as e:
@@ -74,10 +100,9 @@ def init_db_pool():
 
 
 def _ping(conn) -> bool:
-    """SELECT 1 + per-transaction statement_timeout. False if the connection is dead."""
+    """One-round-trip liveness check (autocommit SELECT 1). False if the connection is dead."""
     try:
         cur = conn.cursor()
-        cur.execute("SET LOCAL statement_timeout = %s", (DB_STATEMENT_TIMEOUT_MS,))
         cur.execute("SELECT 1")
         cur.fetchone()
         cur.close()
@@ -87,10 +112,51 @@ def _ping(conn) -> bool:
         return False
 
 
+def _init_conn(conn) -> bool:
+    """First use of a fresh connection: autocommit (+ session statement_timeout if
+    startup options are not supported). No round trip when options were accepted."""
+    try:
+        conn.autocommit = True
+        if not _use_startup_options:
+            cur = conn.cursor()
+            cur.execute("SET statement_timeout = %s", (DB_STATEMENT_TIMEOUT_MS,))
+            cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Connection init failed: {e}")
+        return False
+
+
+def begin_transaction(conn):
+    """Switch a pooled (autocommit) connection to an explicit transaction for a
+    multi-statement atomic write; the caller must commit (or an error rolls back).
+    The connection returns to autocommit in return_conn()."""
+    try:
+        if conn.autocommit is True:
+            conn.autocommit = False
+    except Exception:
+        pass
+    return conn
+
+
+def _restore_autocommit(conn):
+    """Leave no open transaction behind and put the connection back to autocommit."""
+    if getattr(conn, "autocommit", True) is False:
+        try:
+            if conn.info.transaction_status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                conn.rollback()
+            conn.autocommit = True
+        except Exception as e:
+            print(f"[DB] restore autocommit failed: {e}")
+            return False
+    return True
+
+
 def discard_conn(conn):
     """Close a broken connection instead of returning it to the pool."""
     if not conn:
         return
+    _last_used.pop(id(conn), None)
     p = connection_pool if _pool_pid == os.getpid() else None
     try:
         if p is not None:
@@ -105,7 +171,9 @@ def discard_conn(conn):
 
 
 def get_conn():
-    """A live, pre-pinged connection or None (logged)."""
+    """A usable connection or None (logged). Fresh connections are initialised
+    (autocommit); reused ones are pinged only after DB_PING_IDLE_S of idleness."""
+    global _use_startup_options
     if not DB_URL:
         return None
     for attempt in range(1, 4):
@@ -113,20 +181,46 @@ def get_conn():
         try:
             conn = p.getconn() if p is not None else psycopg2.connect(**_connect_kwargs())
         except Exception as e:
+            if _use_startup_options and _options_rejected(e):
+                print("[DB] server/pooler rejected startup options — using session SET statement_timeout")
+                _reset_pool_without_options()
+                continue
             print(f"[DB] get_conn error (attempt {attempt}/3): {e}")
             continue
-        if _ping(conn):
-            return conn
+        if getattr(conn, "autocommit", None) is not True:   # fresh connection
+            if _init_conn(conn):
+                return conn
+        else:
+            last = _last_used.get(id(conn))
+            if last is None or time.monotonic() - last <= DB_PING_IDLE_S or _ping(conn):
+                return conn
         discard_conn(conn)
     print("[DB] All connection attempts failed")
     return None
 
 
+def _reset_pool_without_options():
+    global _use_startup_options, connection_pool, _pool_pid
+    with _lock:
+        _use_startup_options = False
+        old = connection_pool
+        connection_pool, _pool_pid = None, None
+    if old is not None:
+        try:
+            old.closeall()
+        except Exception:
+            pass
+
+
 def return_conn(conn):
     if not conn:
         return
+    if not _restore_autocommit(conn):
+        discard_conn(conn)
+        return
     try:
         if connection_pool is not None and _pool_pid == os.getpid():
+            _last_used[id(conn)] = time.monotonic()
             connection_pool.putconn(conn)
         else:
             conn.close()
@@ -179,6 +273,7 @@ def ensure_tables() -> bool:
         return True
 
     def _do(conn):
+        begin_transaction(conn)
         cur = conn.cursor()
         cur.execute(
             """

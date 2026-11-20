@@ -10,6 +10,7 @@ from docubridge_config import (
     DB_URL,
     WEBHOOK_BASE,
     WEBHOOK_SECRET,
+    WEBHOOK_SECRET_TOKEN,
     PORT,
     XAI_API_KEY,
     ADMIN_CHAT_ID,

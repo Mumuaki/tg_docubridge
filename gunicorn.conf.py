@@ -42,3 +42,15 @@ def post_worker_init(worker):
             worker.log.info("DocuBridge startup in worker pid %s: %s", os.getpid(), st)
     except Exception as e:  # never kill the worker: before_request retries later
         worker.log.error("DocuBridge startup failed (will retry on next request): %s", e)
+
+
+def worker_exit(server, worker):
+    """Graceful stop (deploy/SIGTERM): give queued background DB writes a moment."""
+    try:
+        import docubridge_db_writer as w
+        left = w.pending()
+        if left:
+            ok = w.flush(timeout=float(os.getenv("DOCUBRIDGE_FLUSH_TIMEOUT_S", "10") or 10))
+            server.log.info("DocuBridge write queue flushed (%s pending, ok=%s)", left, ok)
+    except Exception as e:
+        server.log.error("DocuBridge write queue flush failed: %s", e)

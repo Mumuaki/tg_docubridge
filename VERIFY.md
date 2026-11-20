@@ -50,3 +50,39 @@ Logs after deploy: `[Sheets] outbox thread started (pid N)`, then `[Sheets] OK: 
 Broadcast: admin sends `/broadcast_stuck` → dry run + preview (to admin only) → button
 «Отправить N …» (single use, 10 min). Report arrives when done. Re-running never resends
 to the same chat for the same campaign (`broadcast_log`).
+
+## PR — DB round trips + webhook secret_token
+
+### What changed
+- Pool keeps connections (psycopg2 closed every returned connection because `minconn=0`).
+- Autocommit for single statements; `statement_timeout` via connect `options`
+  (fallback to a session `SET` if a pooler rejects `options`); `SELECT 1` pre-ping only
+  after `DB_PING_IDLE_S` (default 60 s) idle. Transactions kept for `create_shipment`,
+  `update_shipment_status`, `ensure_tables`, outbox/broadcast claims.
+- One query for dedup + user state (`check_update_and_state`), state prefetched for the update.
+- Background writer (one daemon thread, bounded queue) for `save_message`,
+  `mark_update_processed`, `record_start_event`; flushed on gunicorn `worker_exit` / atexit.
+  `DOCUBRIDGE_ASYNC_WRITES=0` restores synchronous writes.
+- Startup log: `[DB] host=<hostname> SELECT 1 ×5: median N ms (...)` (hostname only).
+- New `POST /webhook` with `X-Telegram-Bot-Api-Secret-Token` (`WEBHOOK_SECRET_TOKEN`).
+
+Local count (`python rt_harness.py`, one funnel step, warm pool): before 6 DB calls on
+6 new connections (~52 round trips); after 2 round trips on the reply path + 3 in background.
+
+### After deploy (no env change yet)
+1. Logs: `[DB] host=… median … ms`, `✅ Webhook set to: …/webhook/<secret>` (old route still used).
+2. Send /start to the bot; replies should be noticeably faster. No `[DBW] … failed` lines.
+
+### Switching the webhook to secret_token
+1. Render → Environment → add `WEBHOOK_SECRET_TOKEN` (1–256 chars, only `A-Z a-z 0-9 _ -`).
+   Adding a var triggers a deploy (merge mode, never replace).
+2. Logs: `✅ Webhook set to: https://…/webhook (secret_token header)`; send /start, check reply.
+   `[Webhook] /webhook rejected (403): token missing|mismatch` lines = foreign or misconfigured requests.
+3. After a few days without traffic on the old path: follow-up PR removing `/webhook/<WEBHOOK_SECRET>`.
+4. Then rotate `WEBHOOK_SECRET` (the old value appeared in access logs).
+5. Remove `--access-logfile` from `GUNICORN_CMD_ARGS` if present.
+
+Rollback: remove `WEBHOOK_SECRET_TOKEN` → next start calls `set_webhook` with the old URL.
+
+Optional env: `DB_PING_IDLE_S` (60), `DOCUBRIDGE_ASYNC_WRITES` (1),
+`DOCUBRIDGE_WRITE_QUEUE_MAX` (1000), `DOCUBRIDGE_FLUSH_TIMEOUT_S` (10).

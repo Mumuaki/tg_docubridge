@@ -6,7 +6,7 @@ import psycopg2
 import psycopg2.extras
 
 from docubridge_config import DB_URL
-from docubridge_db_pool_a import get_conn, return_conn, db_run
+from docubridge_db_pool_a import get_conn, return_conn, db_run, begin_transaction
 
 
 def _run(label, fn, default=None, retry=True):
@@ -41,6 +41,7 @@ def update_shipment_status(ticket: str, status: str, comment: Optional[str] = No
         return None
 
     def _do(conn):
+        begin_transaction(conn)   # status + event: all or nothing
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
