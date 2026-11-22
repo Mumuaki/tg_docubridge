@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow import *  # noqa: F401,F403
+from docubridge_funnel import prompt_step
 from docubridge_reminders import start_reminder_thread, reminder_health
 from docubridge_sheets import start_sheets_thread, sheets_health
 import docubridge_admin as _admin  # noqa: F401  (registers admin handlers before catch-all)
@@ -96,6 +97,44 @@ def hub_route_cb(call):
     _, data = get_state(chat_id)
     start_send_flow(chat_id, role="sender", ref=(data or {}).get("ref"),
                     from_country=fc, to_country=tc)
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "") in OFFER_CALLBACKS)
+def offer_cb(call):
+    """Inline buttons under the route offer: calc, allowed docs, menu."""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"[offer] answer_callback_query failed: {e}")
+    chat = getattr(getattr(call, "message", None), "chat", None)
+    if getattr(chat, "type", "private") != "private":
+        return
+    chat_id = chat.id
+    state, data = get_state(chat_id)
+    data = dict(data or {})
+    if state == DB_ERROR_STATE:
+        send_db_error(chat_id)
+        return
+    action = call.data or ""
+    if action == OFFER_CB_MENU:
+        go_menu(chat_id)
+        return
+    if action == OFFER_CB_ALLOWED:
+        if state == "route_offer":
+            show_allowed_docs(chat_id, offer=True)
+        else:
+            show_allowed_docs(chat_id)
+        return
+    # OFFER_CB_CALC — same path as the leftover «Рассчитать точно» text button
+    if state == "route_offer":
+        prompt_step(chat_id, "ask_doc_type", data)
+        return
+    if state in {None, "greeting", "choose_route"}:
+        fc, tc = data.get("from_country"), data.get("to_country")
+        if fc and tc and is_allowed_route(fc, tc):
+            prompt_step(chat_id, "ask_doc_type", data)
+            return
+        start_send_flow(chat_id, role=data.get("role") or "sender", ref=data.get("ref"))
 
 
 @bot.message_handler(commands=["track"])

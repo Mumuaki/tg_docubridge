@@ -64,7 +64,7 @@ def show_route_offer(chat_id: int, data: Dict[str, Any]):
     set_state(chat_id, "route_offer", data)
     msg = route_offer_text(data["from_country"], data["to_country"])
     save_message(chat_id, None, msg)
-    bot.send_message(chat_id, msg, reply_markup=offer_keyboard())
+    send_offer_message(chat_id, msg)
 
 
 def ask_doc_type(chat_id: int, data: Dict[str, Any]):
@@ -77,7 +77,7 @@ def ask_doc_type(chat_id: int, data: Dict[str, Any]):
     )
 
 
-def show_allowed_docs(chat_id: int, reply_markup=None):
+def show_allowed_docs(chat_id: int, reply_markup=None, *, offer: bool = False):
     # Prefer plain text version if Markdown fails — send with Markdown first carefully
     text = (
         "Что можно отправлять\n\n"
@@ -92,7 +92,10 @@ def show_allowed_docs(chat_id: int, reply_markup=None):
         "личности и аналогичные оригиналы документов, удостоверяющих личность."
     )
     save_message(chat_id, None, text)
-    bot.send_message(chat_id, text, reply_markup=reply_markup or main_menu())
+    if offer:
+        send_offer_message(chat_id, text)
+    else:
+        bot.send_message(chat_id, text, reply_markup=reply_markup or main_menu())
 
 
 def start_track_flow(chat_id: int):

@@ -74,7 +74,7 @@ def prompt_step(chat_id: int, state: str, data: Dict, prefix: Optional[str] = No
         set_state(chat_id, "route_offer", data)
         msg = head + route_offer_text(data["from_country"], data["to_country"])
         save_message(chat_id, None, msg)
-        bot.send_message(chat_id, msg, reply_markup=offer_keyboard())
+        send_offer_message(chat_id, msg)
         return
     if state not in FUNNEL_STATES:
         go_menu(chat_id, (head + "Главное меню. Выберите действие:").strip())

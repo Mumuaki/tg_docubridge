@@ -18,6 +18,10 @@ def kb_texts(kb):
     return [b["text"] for b in kb_raw(kb)] if kb is not None else []
 
 
+def kb_cbs(kb):
+    return [b.get("callback_data") for b in kb_raw(kb)] if kb is not None else []
+
+
 class TestOfferFirst(Base):
     def test_all_route_deeplinks_offer_first(self):
         for key in ("ua_ru", "ua_by", "ru_ua", "by_ua"):
@@ -27,15 +31,20 @@ class TestOfferFirst(Base):
             self.assertEqual(len(self.sent), 1)
             for w in ("от €140", "10–14", "паспорта", "ID-карты", "военные билеты"):
                 self.assertIn(w, text)
-            self.assertIn(m.BTN_CALC, kb_texts(kb))
-            self.assertIn(m.MENU_ALLOWED, kb_texts(kb))
+            self.assertIsInstance(kb, m.InlineKeyboardMarkup)
+            self.assertEqual(kb_texts(kb), [m.BTN_CALC, m.MENU_ALLOWED, m.BTN_MENU])
+            self.assertEqual(kb_cbs(kb), [m.OFFER_CB_CALC, m.OFFER_CB_ALLOWED, m.OFFER_CB_MENU])
+            self.assertEqual(len(kb_texts(kb)), len(set(kb_texts(kb))))  # no duplicate buttons
+            self.assertIsInstance(self.send_calls[0][1], m.ReplyKeyboardRemove)
             self.assertEqual(self.states[CHAT][0], "route_offer")
 
     def test_allowed_docs_keeps_offer(self):
         h.start(msg("/start ua_by")); self.sent.clear()
         h.any_text(msg(m.MENU_ALLOWED))
         self.assertIn("НЕ принимаем", self.texts())
-        self.assertIn(m.BTN_CALC, kb_texts(self.sent[-1][1]))
+        kb = self.sent[-1][1]
+        self.assertIsInstance(kb, m.InlineKeyboardMarkup)
+        self.assertEqual(kb_texts(kb), [m.BTN_CALC, m.MENU_ALLOWED, m.BTN_MENU])
         self.assertEqual(self.states[CHAT][0], "route_offer")
 
     def test_question_on_offer(self):
@@ -174,6 +183,99 @@ class TestPhone(unittest.TestCase):
         self.assertFalse(m.is_step_question("Киев"))
         self.assertFalse(m.is_step_question("Стокгольм"))
 
+
+def offer_call(data, chat_id=CHAT):
+    return SimpleNamespace(
+        id="off1",
+        data=data,
+        message=SimpleNamespace(chat=SimpleNamespace(id=chat_id, type="private")),
+        from_user=SimpleNamespace(id=chat_id),
+    )
+
+
+class TestOfferInline(Base):
+    def test_calc_callback_starts_quote(self):
+        h.start(msg("/start ua_ru"))
+        self.sent.clear()
+        h.offer_cb(offer_call(m.OFFER_CB_CALC))
+        self.assertEqual(self.states[CHAT][0], "ask_doc_type")
+        self.assertIn("1/2", self.sent[-1][0])
+        self.assertIn("Доверенность", kb_texts(self.sent[-1][1]))
+        # later funnel steps still use a reply keyboard (phone contact must stay)
+        self.assertIsInstance(self.sent[-1][1], m.ReplyKeyboardMarkup)
+
+    def test_text_calc_still_works(self):
+        h.start(msg("/start ua_by"))
+        h.any_text(msg(m.BTN_CALC))
+        self.assertEqual(self.states[CHAT][0], "ask_doc_type")
+
+    def test_keyword_calc_still_works(self):
+        h.start(msg("/start ru_ua"))
+        h.any_text(msg("хочу рассчитать стоимость"))
+        self.assertEqual(self.states[CHAT][0], "ask_doc_type")
+
+    def test_allowed_callback_keeps_offer_buttons(self):
+        h.start(msg("/start ua_ru")); self.sent.clear()
+        h.offer_cb(offer_call(m.OFFER_CB_ALLOWED))
+        self.assertEqual(self.states[CHAT][0], "route_offer")
+        self.assertIn("НЕ принимаем", self.texts())
+        self.assertEqual(kb_texts(self.sent[-1][1]), [m.BTN_CALC, m.MENU_ALLOWED, m.BTN_MENU])
+
+    def test_menu_callback_goes_to_menu(self):
+        h.start(msg("/start ua_ru"))
+        h.offer_cb(offer_call(m.OFFER_CB_MENU))
+        self.assertEqual(self.states[CHAT][0], "greeting")
+        self.assertIsInstance(self.sent[-1][1], m.ReplyKeyboardMarkup)
+        self.assertIn(m.MENU_SEND, kb_texts(self.sent[-1][1]))
+
+    def test_question_on_offer_keeps_inline(self):
+        h.start(msg("/start ua_ru")); self.sent.clear()
+        h.any_text(msg("а сколько стоит?"))
+        self.assertIn("€140", self.texts())
+        self.assertEqual(self.states[CHAT][0], "route_offer")
+        self.assertIsInstance(self.sent[-1][1], m.InlineKeyboardMarkup)
+        self.assertEqual(kb_cbs(self.sent[-1][1]), [m.OFFER_CB_CALC, m.OFFER_CB_ALLOWED, m.OFFER_CB_MENU])
+
+    def test_stale_calc_callback_does_not_leave_confirm(self):
+        h.start(msg("/start ua_ru"))
+        for t in (m.BTN_CALC, "Свидетельство", "до 100 г", m.BTN_APPLY, "Киев", "Москва", "Иван", "+380501234567"):
+            h.any_text(msg(t))
+        self.assertEqual(self.states[CHAT][0], "confirm")
+        before = self.states[CHAT]
+        self.sent.clear()
+        h.offer_cb(offer_call(m.OFFER_CB_CALC))
+        self.assertEqual(self.states[CHAT], before)
+        self.assertEqual(self.sent, [])
+
+    def test_deeplink_and_hub_land_on_inline_offer(self):
+        h.start(msg("/start ua_ru"))
+        self.assertEqual(self.states[CHAT][0], "route_offer")
+        self.assertIsInstance(self.sent[-1][1], m.InlineKeyboardMarkup)
+        h.start(msg("/start dokumenty"))
+        call = SimpleNamespace(id="1", data="hub:by_ua",
+                               message=msg(""), from_user=SimpleNamespace(id=CHAT))
+        h.hub_route_cb(call)
+        self.assertEqual(self.states[CHAT][0], "route_offer")
+        self.assertEqual(kb_cbs(self.sent[-1][1]), [m.OFFER_CB_CALC, m.OFFER_CB_ALLOWED, m.OFFER_CB_MENU])
+
+    def test_phone_contact_keyboard_untouched(self):
+        h.start(msg("/start ua_by"))
+        for t in (m.BTN_CALC, "Диплом / аттестат", "до 300 г", m.BTN_APPLY, "Львов", "Минск", "Иван Петров"):
+            h.any_text(msg(t))
+        self.assertEqual(self.states[CHAT][0], "ask_phone")
+        b = [x for x in kb_raw(self.sent[-1][1]) if x["text"] == m.BTN_SHARE_CONTACT][0]
+        self.assertTrue(b.get("request_contact"))
+        self.assertIsInstance(self.sent[-1][1], m.ReplyKeyboardMarkup)
+
+    def test_back_to_offer_is_inline_again(self):
+        h.start(msg("/start ua_ru"))
+        h.offer_cb(offer_call(m.OFFER_CB_CALC))
+        self.assertEqual(self.states[CHAT][0], "ask_doc_type")
+        h.any_text(msg(m.BTN_BACK))
+        self.assertEqual(self.states[CHAT][0], "route_offer")
+        self.assertIsInstance(self.sent[-1][1], m.InlineKeyboardMarkup)
+        self.assertEqual(kb_texts(self.sent[-1][1]), [m.BTN_CALC, m.MENU_ALLOWED, m.BTN_MENU])
+        self.assertIsInstance(self.send_calls[-1][1], m.ReplyKeyboardRemove)
 
 if __name__ == "__main__":
     unittest.main()
