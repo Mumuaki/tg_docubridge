@@ -144,28 +144,26 @@ def pay_button_keyboard(ticket: str, lang: str = "ru") -> InlineKeyboardMarkup:
     return kb
 
 
-def currency_payment_text(ticket: str, cur: str, data: Optional[Dict] = None, lang: str = "ru") -> str:
-    """After a currency is chosen. Details verbatim; no amount, no rate; pay after arrival."""
-    details = pcfg.payment_text_for(cur)
-    arr = pcfg.arrival(origin(data), lang)
-    if details:
-        return t("pay_details", lang, ticket=ticket, cur=cur, details=details, arrival=arr,
-                 pct=pcfg.PREPAYMENT_PERCENT)
-    return t("pay_fallback", lang, ticket=ticket, cur=cur, rt=rt(lang), arrival=arr)
+def currency_saved_text(ticket: str, cur: str, data: Optional[Dict] = None, lang: str = "ru") -> str:
+    """Currency chosen before the documents arrived: saved, NO payment details yet."""
+    return t("cur_saved", lang, cur=cur, arrival=pcfg.arrival(origin(data), lang))
 
 
-def group_currency_note(ticket: str, cur: str, stored) -> str:
+def group_currency_note(ticket: str, cur: str, stored, requested: bool = False) -> str:
+    """Group note on a currency choice. Before /payreq nothing has been sent to the client."""
     tail = "" if stored else "\n(валюта не сохранена в БД — БД недоступна)"
-    if pcfg.payment_text_for(cur):
-        return f"💱 {ticket}: клиент выбрал {cur}, реквизиты выданы ботом.{tail}"
-    return f"⚠️ {ticket}: клиент выбрал {cur}, реквизитов нет, пришлите вручную{tail}"
+    if requested and not pcfg.payment_text_for(cur):
+        return f"⚠️ {ticket}: клиент выбрал {cur}, реквизитов нет, пришлите вручную{tail}"
+    return f"💱 {ticket}: клиент выбрал {cur}{tail}"
 
 
 def payment_answer(ticket: Optional[str] = None, currency: Optional[str] = None,
-                   data: Optional[Dict] = None, lang: str = "ru") -> str:
-    """Text answer to «как оплатить?» (pre-order, or the chosen currency)."""
+                   data: Optional[Dict] = None, lang: str = "ru", requested: bool = False) -> str:
+    """Text answer to «как оплатить?». Details only after the admin payment request (/payreq)."""
     if ticket and currency:
-        return currency_payment_text(ticket, currency, data, lang)
+        if requested:
+            return payment_request_text(ticket, data, currency, lang)
+        return currency_saved_text(ticket, currency, data, lang)
     return t("pay_preorder", lang, pct=pcfg.PREPAYMENT_PERCENT, arrival_any=pcfg.ARRIVAL_ANY[lang])
 
 

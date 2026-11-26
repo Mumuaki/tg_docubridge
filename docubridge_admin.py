@@ -169,13 +169,18 @@ def request_payment(ticket: str):
     except Exception as e:
         print(f"[ADMIN payreq] client notify error: {e}")
         return False, f"Не удалось отправить клиенту просьбу об оплате по {row['ticket']}."
+    if ndb.mark_pay_requested(row["ticket"]) is not True:
+        print(f"[ADMIN payreq] {row['ticket']}: pay_requested_at not stored")
+        not_saved = "\n⚠️ Отметка «оплата запрошена» не сохранена в БД — реквизиты по кнопке валюты клиент не получит, пришлите вручную."
+    else:
+        not_saved = ""
     if cur and not ns.pcfg.payment_text_for(cur):
         note = f"⚠️ {row['ticket']}: клиент выбрал {cur}, реквизитов нет, пришлите вручную"
     else:
         note = ""
     who = f"валюта: {cur}" if cur else "валюта не выбрана — клиенту показан выбор валюты"
     msg = f"✅ {row['ticket']}: клиенту отправлена просьба об оплате ({who})."
-    return True, msg + (f"\n{note}" if note else "")
+    return True, msg + (f"\n{note}" if note else "") + not_saved
 
 
 @bot.message_handler(commands=["payreq"], func=lambda m: is_admin(m.chat.id))

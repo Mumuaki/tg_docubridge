@@ -252,7 +252,8 @@ def handle_special_text(chat_id: int, text: str, state: Optional[str], data: Dic
         if intent == "address":
             ans = ns.address_answer(None, lang)
         elif intent == "payment":
-            ans = ns.payment_answer(ticket, data.get("pay_currency"), data, lang)
+            requested = bool(ticket) and ndb.pay_requested(ticket, chat_id) is True
+            ans = ns.payment_answer(ticket, data.get("pay_currency"), data, lang, requested)
         else:
             ans = ns.handover_answer(ticket, data, lang)
         reply_keep_step(chat_id, ans, state, data)
@@ -337,10 +338,14 @@ def currency_cb(call):
     if state == "completed" and (sdata or {}).get("ticket") == ticket:
         set_state(chat_id, "completed", dict(sdata, pay_currency=cur))
     print(f"[Pay] chat={chat_id} {ticket} currency={cur} stored={stored is not None}")
-    msg = ns.currency_payment_text(ticket, cur, data, lang)
+    # Details go out ONLY after the documents arrived (admin /payreq or «📥 Документы получены»).
+    requested = stored is not None and ndb.pay_requested(ticket, chat_id) is True
+    msg = (ns.payment_request_text(ticket, data, cur, lang) if requested
+           else ns.currency_saved_text(ticket, cur, data, lang))
     save_message(chat_id, None, msg)
     bot.send_message(chat_id, msg, reply_markup=ns.after_payment_keyboard(ticket, lang))
-    send_group_note(chat_id, ns.group_currency_note(ticket, cur, stored is not None), scope=f"cur:{ticket}:{cur}")
+    send_group_note(chat_id, ns.group_currency_note(ticket, cur, stored is not None, requested),
+                    scope=f"cur:{ticket}:{cur}:{int(requested)}")
 
 
 # ------------ «Условия подходят, нужен адрес» ------------

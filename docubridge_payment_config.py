@@ -2,7 +2,7 @@
 """Payment configuration approved by the owner. Logic never hard-codes these values.
 
 Env overrides (the owner sets them; Render is not changed by code):
-  DOCUBRIDGE_PAY_CURRENCIES      — currency buttons after the order, default «UAH,EUR,USD»
+  DOCUBRIDGE_PAY_CURRENCIES      — currency buttons after the order, default «UAH,EUR,RUB» (not approved yet)
   DOCUBRIDGE_PAYMENT_TEXT_<CUR>  — payment details for one currency, shown verbatim
                                    («\\n» in the value = new line). Empty → the default below.
 
@@ -10,7 +10,8 @@ Env overrides (the owner sets them; Render is not changed by code):
   DOCUBRIDGE_HANDOVER_TEXT_UA_UK / _RUBY_UK — the same in Ukrainian (else the base env, else default)
 
 Approved by the owner 26.11.2026:
-  * UAH details (verbatim, the payment purpose has NO ticket number); EUR/RUB: none yet →
+  * UAH details (verbatim, the payment purpose has NO ticket number), sent to the client ONLY
+    after the documents arrived (admin /payreq or «📥 Документы получены»); other currencies: none yet →
     «реквизиты пришлёт менеджер» + a note to the leads group. No UAH amount / rate.
   * 100% prepayment once the documents have arrived: from Ukraine — in Bratislava,
     from Russia / Belarus — at our agent in Moscow (origin = the order's from_country).
@@ -25,7 +26,7 @@ import os
 import re
 from typing import Dict, List, Optional
 
-DEFAULT_CURRENCIES = "UAH,EUR,RUB"   # owner 26.11 22:23: UAH, EUR, RUB
+DEFAULT_CURRENCIES = "UAH,EUR,RUB"
 
 # Approved text — do not edit without the owner.
 PAYMENT_TEXT_DEFAULTS: Dict[str, str] = {

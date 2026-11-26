@@ -380,6 +380,7 @@ def ensure_tables() -> bool:
             ALTER TABLE shipments ADD COLUMN IF NOT EXISTS pay_currency_at TIMESTAMPTZ;
             -- client accepted the terms → the manager sends the shipping address
             ALTER TABLE shipments ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS pay_requested_at TIMESTAMPTZ;
             -- One-off admin broadcasts: one row per (campaign, chat) = never sent twice
             CREATE TABLE IF NOT EXISTS broadcast_log (
                 campaign TEXT NOT NULL,

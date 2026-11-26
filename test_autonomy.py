@@ -247,7 +247,7 @@ class TestHandoff24h(Base):
     def test_discount_on_step_keeps_step_no_ai(self):
         self.to_quote(); self.say(m.BTN_APPLY, "а скидку дадите?")
         self.assertEqual(self.state(), "ask_from_city")
-        self.assertIn("по тарифу", self.last()[0]); self.assertIn("в течение 24 часов", self.last()[0])
+        self.assertIn("по тарифу: €140 за конверт", self.last()[0]); self.assertIn("в течение 24 часов", self.last()[0])
         self.fai_m.assert_not_called(); self.ai_m.assert_not_called()
         cards = self.group_cards()
         self.assertEqual(len(cards), 1); self.assertIn("просьба о скидке", cards[0])
@@ -286,9 +286,10 @@ class TestHandoff24h(Base):
 
 
 class TestCurrency(Base):
-    def choose(self, cur, stored=None, ticket="DB7777"):
+    def choose(self, cur, stored=None, ticket="DB7777", requested=False):
         stored = dict(UA_DATA) if stored is None else stored
-        with mock.patch.object(ndb, "set_pay_currency", return_value=stored) as sp:
+        with mock.patch.object(ndb, "set_pay_currency", return_value=stored) as sp, \
+                mock.patch.object(ndb, "pay_requested", return_value=requested):
             ho.currency_cb(cb(f"pc:{ticket}:{cur}"))
         return sp
 
@@ -298,36 +299,52 @@ class TestCurrency(Base):
         with mock.patch.dict(os.environ, {"DOCUBRIDGE_PAY_CURRENCIES": "eur, pln;bad1,EUR"}):
             self.assertEqual(pcfg.currencies(), ["EUR", "PLN"])
 
-    def test_uah_details_verbatim_and_after_arrival(self):
+    def test_uah_before_payreq_no_details(self):
         self.states[CHAT] = ("completed", {"ticket": "DB7777"})
         sp = self.choose("UAH")
         sp.assert_called_once_with("DB7777", CHAT, "UAH")
-        self.assertEqual(self.client_msgs()[-1],
-                         "💳 Реквизиты для оплаты заявки DB7777 (UAH):\n" + UAH_TEXT + "\n\n"
-                         "Платить нужно после того, как документы поступят в Братиславу — менеджер сообщит "
-                         "о поступлении в этом чате (100% предоплата).")
+        self.assertEqual(self.client_msgs()[-1], "Валюта UAH сохранена. Реквизиты пришлём в этом чате, "
+                                                 "когда документы поступят в Братиславу.")
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
+        self.assertNotIn("Отримувач", self.texts())
         self.assertEqual(self.states[CHAT], ("completed", {"ticket": "DB7777", "pay_currency": "UAH"}))
-        self.assertEqual(self.group_cards(), ["💱 DB7777: клиент выбрал UAH, реквизиты выданы ботом."])
+        self.assertEqual(self.group_cards(), ["💱 DB7777: клиент выбрал UAH"])
 
-    def test_eur_rub_fallback_24h_and_alert_once(self):
-        self.choose("EUR", dict(RU_DATA))
+    def test_uah_after_payreq_details_verbatim(self):
+        self.choose("UAH", requested=True)
         self.assertEqual(self.client_msgs()[-1],
-                         "💳 Оплата заявки DB7777 в EUR: реквизиты пришлёт менеджер отдельным сообщением "
-                         "в этом чате в течение 24 часов. Платить нужно после того, как документы поступят "
-                         "нашему агенту в Москве — менеджер сообщит о поступлении.")
-        self.assertEqual(self.group_cards(), ["⚠️ DB7777: клиент выбрал EUR, реквизитов нет, пришлите вручную"])
-        self.choose("EUR", dict(RU_DATA))
-        self.assertEqual(len(self.group_cards()), 1)
+                         "📥 Документы по заявке DB7777 поступили в Братиславу. Теперь нужна оплата — "
+                         "100% предоплата.\n\nРеквизиты (UAH):\n" + UAH_TEXT)
+        self.assertEqual(self.group_cards(), ["💱 DB7777: клиент выбрал UAH"])
+
+    def test_ru_by_saved_text(self):
         self.choose("RUB", dict(RU_DATA))
-        self.assertIn("⚠️ DB7777: клиент выбрал RUB, реквизитов нет, пришлите вручную", self.group_cards())
+        self.assertEqual(self.client_msgs()[-1], "Валюта RUB сохранена. Реквизиты пришлём в этом чате, "
+                                                 "когда документы поступят нашему агенту в Москве.")
+        self.assertEqual(self.group_cards(), ["💱 DB7777: клиент выбрал RUB"])
+
+    def test_eur_no_details_alert_only_after_payreq(self):
+        self.choose("EUR", dict(RU_DATA))
+        self.assertNotIn("реквизитов нет", " ".join(self.group_cards()))
+        self.choose("EUR", dict(RU_DATA), requested=True)
+        self.assertIn("пришлёт менеджер отдельным сообщением в этом чате в течение 24 часов", self.client_msgs()[-1])
+        self.assertIn("⚠️ DB7777: клиент выбрал EUR, реквизитов нет, пришлите вручную", self.group_cards())
+        self.choose("EUR", dict(RU_DATA), requested=True)
+        self.assertEqual(len(self.group_cards()), 2)          # each note once
+
+    def test_db_down_on_requested_check_sends_no_details(self):
+        with mock.patch.object(ndb, "set_pay_currency", return_value=dict(UA_DATA)), \
+                mock.patch.object(ndb, "pay_requested", return_value=None):
+            ho.currency_cb(cb("pc:DB7777:UAH"))
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
 
     def test_env_overrides_text(self):
         with mock.patch.dict(os.environ, {"DOCUBRIDGE_PAYMENT_TEXT_UAH": "Нові реквізити\\nрядок 2",
                                           "DOCUBRIDGE_PAYMENT_TEXT_EUR": "EUR реквизиты"}):
-            self.choose("UAH")
+            self.choose("UAH", requested=True)
             self.assertIn("Нові реквізити\nрядок 2", self.client_msgs()[-1])
             self.assertNotIn("UA853220010000026002310087318", self.client_msgs()[-1])
-            self.choose("EUR")
+            self.choose("EUR", requested=True)
             self.assertIn("EUR реквизиты", self.client_msgs()[-1])
 
     def test_stale_button_keeps_state(self):
@@ -339,7 +356,7 @@ class TestCurrency(Base):
 
     def test_foreign_order_keeps_state(self):
         self.states[CHAT] = ("ask_doc_type", {"x": 1})
-        self.choose("UAH", stored=False, ticket="DB1111")
+        self.choose("UAH", stored=False, ticket="DB1111", requested=True)
         self.assertEqual(self.states[CHAT], ("ask_doc_type", {"x": 1}))
         self.assertNotIn("UA853220010000026002310087318", self.texts())
 
@@ -348,33 +365,62 @@ class TestCurrency(Base):
             ho.currency_cb(cb("pc:DB7777:EUR"))
         self.assertIn("БД недоступна", self.group_cards()[0])
 
-    def test_payment_question_after_order(self):
+    def ask(self, text, requested):
+        with mock.patch.object(ndb, "pay_requested", return_value=requested) as pr:
+            self.say(text)
+        return pr
+
+    def test_how_to_pay_before_payreq(self):
         self.states[CHAT] = ("completed", dict(UA_DATA))
-        self.say("куда платить?")
+        self.ask("куда платить?", False)
         self.assertIn("В какой валюте будете оплачивать заявку DB7777?", self.last()[0])
         self.states[CHAT] = ("completed", dict(UA_DATA, pay_currency="UAH"))
-        self.say("как оплатить?")
-        self.assertIn(UAH_TEXT, self.last()[0])
+        pr = self.ask("как оплатить?", False)
+        pr.assert_called_once_with("DB7777", CHAT)
+        self.assertIn("Валюта UAH сохранена. Реквизиты пришлём в этом чате, когда документы поступят "
+                      "в Братиславу.", self.last()[0])
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
+        self.ask("как оплатить?", None)                         # DB down → still no details
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
+
+    def test_how_to_pay_after_payreq(self):
+        self.states[CHAT] = ("completed", dict(UA_DATA, pay_currency="UAH"))
+        self.ask("как оплатить?", True)
+        self.assertEqual(self.last()[0], "📥 Документы по заявке DB7777 поступили в Братиславу. Теперь нужна "
+                                         "оплата — 100% предоплата.\n\nРеквизиты (UAH):\n" + UAH_TEXT)
+        self.ai_m.assert_not_called()
 
     def test_payment_question_before_order(self):
         self.to_quote(); self.say(m.BTN_APPLY, "а как оплатить?")
         self.assertEqual(self.state(), "ask_from_city")
         self.assertIn("100% предоплата после поступления документов", self.last()[0])
+        self.assertIn("реквизиты пришлём в этом чате только после того, как документы поступят", self.last()[0])
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
         self.fai_m.assert_not_called()
 
 
 class TestPaymentRequest(Base):
-    def run_req(self, row):
-        with mock.patch.object(ndb, "get_order_pay_info", return_value=row):
-            return adm.request_payment("DB7777")
+    def run_req(self, row, marked=True):
+        with mock.patch.object(ndb, "get_order_pay_info", return_value=row), \
+                mock.patch.object(ndb, "mark_pay_requested", return_value=marked) as mp:
+            res = adm.request_payment("DB7777")
+        self.mark = mp
+        return res
 
     def test_uah_from_ukraine(self):
         ok, msg = self.run_req({"ticket": "DB7777", "chat_id": CHAT, "payload": UA_DATA, "pay_currency": "UAH"})
-        self.assertTrue(ok); self.assertIn("UAH", msg)
+        self.assertTrue(ok)
+        self.assertEqual(msg, "✅ DB7777: клиенту отправлена просьба об оплате (валюта: UAH).")
+        self.mark.assert_called_once_with("DB7777")
         t_ = self.client_msgs()[-1]
         self.assertTrue(t_.startswith("📥 Документы по заявке DB7777 поступили в Братиславу. "
                                       "Теперь нужна оплата — 100% предоплата."))
         self.assertIn(UAH_TEXT, t_)
+
+    def test_mark_not_stored_warns_admin(self):
+        ok, msg = self.run_req({"ticket": "DB7777", "chat_id": CHAT, "payload": UA_DATA, "pay_currency": "UAH"},
+                               marked=None)
+        self.assertTrue(ok); self.assertIn("не сохранена в БД", msg)
 
     def test_no_currency_asks_choice(self):
         ok, msg = self.run_req({"ticket": "DB7777", "chat_id": CHAT, "payload": RU_DATA, "pay_currency": None})
@@ -404,6 +450,15 @@ class TestPaymentRequest(Base):
         kb = kbm.status_inline_keyboard("DB7777")
         self.assertIn("st:DB7777:payreq", cbs(kb))
         self.assertIn("📥 Документы получены — запросить оплату", labels(kb))
+
+    def test_db_sql_idempotent(self):
+        import inspect
+        import docubridge_db_pool_a as pa
+        self.assertIn("ADD COLUMN IF NOT EXISTS pay_requested_at", inspect.getsource(pa))
+        self.assertIn("COALESCE(pay_requested_at, NOW())", inspect.getsource(ndb.mark_pay_requested))
+        with mock.patch.object(ndb, "DB_URL", None):
+            self.assertIsNone(ndb.mark_pay_requested("DB1"))
+            self.assertIsNone(ndb.pay_requested("DB1", 1))
 
 
 class TestStatusAndTrack(Base):
@@ -441,6 +496,7 @@ class TestLanguage(Base):
         for t_, lang in (("Скільки коштує?", "uk"), ("як оплатити", "uk"), ("що це", "uk"), ("можна дешевше", "uk"),
                          ("яка у вас адреса?", "uk"), ("дайте знижку", "uk"),
                          ("сколько стоит", "ru"), ("Привет, можно?", "ru"), ("вам удобно?", "ru"),
+                         ("будь готов", "ru"), ("де-факто", "ru"), ("ви", "ru"), ("коли", "ru"), ("будь ласка", "uk"),
                          ("какой адрес?", "ru"), ("Hello", "ru")):
             self.assertEqual(L.detect_lang(t_), lang, t_)
         for t_ in ("", "/start", "+380671234567", "123"):
@@ -483,14 +539,22 @@ class TestLanguage(Base):
 
     def test_ukrainian_currency_and_terms(self):
         L.remember(CHAT, "дякую")
-        with mock.patch.object(ndb, "set_pay_currency", return_value=dict(UA_DATA)):
+        with mock.patch.object(ndb, "set_pay_currency", return_value=dict(UA_DATA)), \
+                mock.patch.object(ndb, "pay_requested", return_value=False):
             ho.currency_cb(cb("pc:DB7777:UAH"))
-        self.assertIn("💳 Реквізити для оплати заявки DB7777 (UAH):\n" + UAH_TEXT, self.client_msgs()[-1])
-        self.assertIn("Оплатити потрібно після того, як документи надійдуть до Братислави", self.client_msgs()[-1])
-        with mock.patch.object(ndb, "set_pay_currency", return_value=dict(RU_DATA)):
+        self.assertEqual(self.client_msgs()[-1], "Валюту UAH збережено. Реквізити надішлемо в цьому чаті, "
+                                                 "коли документи надійдуть до Братислави.")
+        with mock.patch.object(ndb, "set_pay_currency", return_value=dict(RU_DATA)), \
+                mock.patch.object(ndb, "pay_requested", return_value=False):
+            ho.currency_cb(cb("pc:DB7777:RUB"))
+        self.assertEqual(self.client_msgs()[-1], "Валюту RUB збережено. Реквізити надішлемо в цьому чаті, "
+                                                 "коли документи надійдуть нашому агенту в Москві.")
+        with mock.patch.object(ndb, "set_pay_currency", return_value=dict(RU_DATA)), \
+                mock.patch.object(ndb, "pay_requested", return_value=True):
             ho.currency_cb(cb("pc:DB7777:EUR"))
-        self.assertIn("реквізити надішле менеджер окремим повідомленням у цьому чаті протягом 24 годин",
+        self.assertIn("Реквізити для оплати в EUR надішле менеджер окремим повідомленням у цьому чаті протягом 24 годин",
                       self.client_msgs()[-1])
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
         with mock.patch.object(ndb, "accept_terms", return_value={"first": True, "at": None, "payload": UA_DATA}):
             ho.terms_cb(cb("tc:DB7777"))
         self.assertEqual(self.client_msgs()[-1], "Дякуємо! Запит адреси передано менеджеру — "
@@ -516,7 +580,7 @@ class TestAiPromptAndDdl(unittest.TestCase):
     def test_prompt(self):
         p = rt.AI_SYSTEM_PROMPT
         for w in ("€140", "500 г", "10–14", "паспорта", "Скидок", "по-украински", "Братиславу",
-                  "Москве", "Адрес даёт менеджер", rt.AI_UNKNOWN_MARK):
+                  "Москве", "Адрес даёт менеджер", "только после поступления документов", rt.AI_UNKNOWN_MARK):
             self.assertIn(w, p)
 
     def test_unknown_mark_and_temperature(self):

@@ -404,6 +404,47 @@ def accept_terms(ticket: str, chat_id: int):
     return _run("accept_terms", _do, default=None, retry=False)
 
 
+def mark_pay_requested(ticket: str):
+    """Documents arrived, payment requested: keep the first pay_requested_at. True | False (no order) | None (DB down)."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE shipments SET pay_requested_at = COALESCE(pay_requested_at, NOW())
+             WHERE UPPER(ticket) = UPPER(%s)
+            RETURNING pay_requested_at
+            """,
+            (ticket,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return bool(row)
+
+    return _run("mark_pay_requested", _do, default=None, retry=False)
+
+
+def pay_requested(ticket: str, chat_id: int):
+    """True once the admin requested payment for this chat's order; False otherwise; None = DB down."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT pay_requested_at FROM shipments WHERE UPPER(ticket) = UPPER(%s) AND chat_id = %s",
+            (ticket, int(chat_id)),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return bool(row and row[0])
+
+    return _run("pay_requested", _do, default=None)
+
+
 def get_order_pay_info(ticket: str) -> Optional[Dict]:
     """{'ticket', 'chat_id', 'payload', 'pay_currency'} for the admin payment request; None if missing/DB down."""
     if not DB_URL:
