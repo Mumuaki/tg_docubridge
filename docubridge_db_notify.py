@@ -344,3 +344,27 @@ def claim_handoff(chat_id: int, scope: str, reason: str, ticket: Optional[str],
         return ok
 
     return _run("claim_handoff", _do, default=None, retry=False)
+
+
+def set_pay_currency(ticket: str, chat_id: int, currency: str) -> Optional[bool]:
+    """Store the chosen currency on the client's own order (idempotent overwrite).
+    True = stored; False = no such order for this chat (stale/foreign button); None = DB down."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE shipments SET pay_currency = %s, pay_currency_at = NOW()
+             WHERE UPPER(ticket) = UPPER(%s) AND chat_id = %s
+            RETURNING ticket
+            """,
+            (currency, ticket, int(chat_id)),
+        )
+        ok = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        return ok
+
+    return _run("set_pay_currency", _do, default=None, retry=False)

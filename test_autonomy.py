@@ -16,9 +16,17 @@ import docubridge_db_notify as ndb
 import docubridge_runtime as rt
 
 GROUP = -5556349052
-ENV_OFF = {"LEADS_CHAT_ID": str(GROUP), "DOCUBRIDGE_PAYMENT_TEXT": "", "DOCUBRIDGE_HANDOVER_TEXT": ""}
-ENV_ON = {"LEADS_CHAT_ID": str(GROUP), "DOCUBRIDGE_PAYMENT_TEXT": "Оплата по счёту X",
+ENV_OFF = {"LEADS_CHAT_ID": str(GROUP), "DOCUBRIDGE_HANDOVER_TEXT": "", "DOCUBRIDGE_PAY_CURRENCIES": "",
+           "DOCUBRIDGE_PAYMENT_TEXT_UAH": "", "DOCUBRIDGE_PAYMENT_TEXT_EUR": "", "DOCUBRIDGE_PAYMENT_TEXT_USD": ""}
+ENV_ON = {"LEADS_CHAT_ID": str(GROUP), "DOCUBRIDGE_PAYMENT_TEXT_EUR": "Оплата по счёту X",
           "DOCUBRIDGE_HANDOVER_TEXT": "Передача по способу Y"}
+UAH_TEXT = (
+    "Отримувач: ФОП Саєнко Ігор\n"
+    "IBAN: UA853220010000026002310087318\n"
+    "ІПН/ЄДРПОУ: 2468719172\n"
+    "Банк: Акціонерне товариство УНІВЕРСАЛ БАНК, МФО 322001, ЄДРПОУ банку 21133352\n"
+    "Призначення платежу: за послуги з організації доставки"
+)
 
 
 def cb(data, chat=CHAT):
@@ -29,6 +37,8 @@ class Base(FunnelBase):
     def setUp(self):
         super().setUp()
         ho._mem_last.clear()
+        for name in ("get_state", "set_state", "save_message"):
+            p = mock.patch.object(ho, name, getattr(fs, name)); p.start(); self.patches.append(p)
         self.env = mock.patch.dict(os.environ, ENV_OFF); self.env.start(); self.patches.append(self.env)
         self.fwd = mock.patch.object(m.bot, "forward_message"); self.fwd_m = self.fwd.start()
         self.patches.append(self.fwd)
@@ -49,8 +59,9 @@ class TestWhatNext(Base):
     def test_fallback_texts_and_buttons_and_alert_once(self):
         self.to_confirm(); self.confirm()
         thanks = self.client_msgs()[-2]
-        self.assertIn(ns.PAYMENT_FALLBACK, thanks)
+        self.assertIn("выберите валюту оплаты", thanks)
         self.assertIn(ns.HANDOVER_FALLBACK, thanks)
+        self.assertIn("В какой валюте будете оплачивать заявку DB7777?", self.client_msgs()[-1])
         self.assertIn("€140 (конверт до 500 г)", thanks)
         self.assertIn("10–14 рабочих дней", thanks)
         cl = [c for c in m.bot.send_message.call_args_list if c.args[0] == CHAT]
@@ -58,11 +69,12 @@ class TestWhatNext(Base):
         kb = cl[-1].kwargs["reply_markup"]
         self.assertIsInstance(kb, m.InlineKeyboardMarkup)
         self.assertEqual([b.callback_data for r in kb.keyboard for b in r],
-                         ["ns:pay:DB7777", "ns:hand:DB7777", "ns:track:DB7777", "ns:human:DB7777"])
+                         ["pc:DB7777:UAH", "pc:DB7777:EUR", "pc:DB7777:USD",
+                          "ns:hand:DB7777", "ns:track:DB7777", "ns:human:DB7777"])
+        self.assertEqual([b.text for b in kb.keyboard[0]], ["UAH", "EUR", "USD"])
         cards = self.group_cards()
         self.assertEqual(len(cards), 1)
         self.assertIn("⚠️ Не настроено", cards[0])
-        self.assertIn("DOCUBRIDGE_PAYMENT_TEXT", cards[0])
         self.assertIn("DOCUBRIDGE_HANDOVER_TEXT", cards[0])
         self.assertIn("/order DB7777", cards[0])
         self.assertIn("Шаг: заявка оформлена", cards[0]); self.assertIn("Ірина Коваль", cards[0])
@@ -72,12 +84,9 @@ class TestWhatNext(Base):
         with mock.patch.dict(os.environ, ENV_ON):
             self.to_confirm(); self.confirm()
             thanks = self.client_msgs()[-2]
-            self.assertIn("Оплата по счёту X", thanks)
             self.assertIn("Передача по способу Y", thanks)
             self.assertEqual(self.group_cards(), [])
-            h_cb = ho.next_steps_cb
-            h_cb(cb("ns:pay:DB7777")); self.assertIn("Оплата по счёту X", self.last()[0])
-            h_cb(cb("ns:hand:DB7777")); self.assertIn("Передача по способу Y", self.last()[0])
+            ho.next_steps_cb(cb("ns:hand:DB7777")); self.assertIn("Передача по способу Y", self.last()[0])
 
     def test_overweight_goes_to_human(self):
         self.to_quote()
@@ -105,7 +114,8 @@ class TestButtonsAndTrack(Base):
 
     def test_fallback_buttons(self):
         ho.next_steps_cb(cb("ns:pay:DB9"))
-        self.assertIn(ns.PAYMENT_FALLBACK, self.last()[0])
+        self.assertIn("В какой валюте", self.last()[0])
+        self.assertEqual(self.last()[1].keyboard[0][0].callback_data, "pc:DB9:UAH")
         ho.next_steps_cb(cb("ns:hand:DB9"))
         self.assertIn(ns.HANDOVER_FALLBACK, self.last()[0])
 
@@ -115,7 +125,7 @@ class TestButtonsAndTrack(Base):
                 mock.patch.object(fs, "get_shipment_events", return_value=[]):
             ho.next_steps_cb(cb("ns:track:DB7777"))
             self.assertIn("Что дальше", self.last()[0])
-            self.assertIn(ns.PAYMENT_FALLBACK, self.last()[0])
+            self.assertIn("выберите валюту", self.last()[0])
             fs.handle_track_ticket(999, "DB7777")
             self.assertNotIn("Что дальше", self.last()[0])
             row["status"] = "at_hub"
@@ -193,12 +203,93 @@ class TestPaymentFaq(Base):
         self.assertIn("Передача документов", self.last()[0])
         self.ai_m.assert_not_called()
 
-    def test_payment_after_order_uses_env(self):
+    def test_payment_after_order_asks_currency_then_shows_chosen(self):
+        self.states[CHAT] = ("completed", {"ticket": "DB7777"})
+        self.say("куда платить?")
+        self.assertIn("В какой валюте будете оплачивать заявку DB7777?", self.last()[0])
         with mock.patch.dict(os.environ, ENV_ON):
-            self.states[CHAT] = ("completed", {"ticket": "DB7777"})
+            self.states[CHAT] = ("completed", {"ticket": "DB7777", "pay_currency": "EUR"})
             self.say("куда платить?")
             self.assertIn("Оплата по счёту X", self.last()[0])
-            self.assertIn("DB7777", self.last()[0])
+
+
+class TestCurrency(Base):
+    def choose(self, cur, stored=True, ticket="DB7777"):
+        with mock.patch.object(ndb, "set_pay_currency", return_value=stored) as sp:
+            ho.currency_cb(cb(f"pc:{ticket}:{cur}"))
+        return sp
+
+    def test_currencies_from_env(self):
+        import docubridge_payment_config as pcfg
+        self.assertEqual(pcfg.currencies(), ["UAH", "EUR", "USD"])
+        with mock.patch.dict(os.environ, {"DOCUBRIDGE_PAY_CURRENCIES": "eur, pln;bad1,EUR"}):
+            self.assertEqual(pcfg.currencies(), ["EUR", "PLN"])
+            kb = ns.currency_keyboard("DB1", with_actions=False)
+            self.assertEqual([b.callback_data for b in kb.keyboard[0]], ["pc:DB1:EUR", "pc:DB1:PLN"])
+
+    def test_uah_shows_approved_details_verbatim(self):
+        self.states[CHAT] = ("completed", {"ticket": "DB7777"})
+        sp = self.choose("UAH")
+        sp.assert_called_once_with("DB7777", CHAT, "UAH")
+        text = self.client_msgs()[-1]
+        self.assertEqual(text, "💳 Реквизиты для оплаты заявки DB7777 (UAH):\n" + UAH_TEXT)
+        self.assertNotIn("DB7777", text.split("Призначення платежу:")[1])   # no ticket in purpose
+        for w in ("грн", "курс", "₴"):
+            self.assertNotIn(w, text)                                     # no amount / rate
+        self.assertEqual(self.states[CHAT], ("completed", {"ticket": "DB7777", "pay_currency": "UAH"}))
+        self.assertEqual(self.group_cards(), ["💱 DB7777: клиент выбрал UAH, реквизиты выданы ботом."])
+
+    def test_eur_fallback_and_group_alert_once(self):
+        self.choose("EUR")
+        self.assertEqual(self.client_msgs()[-1],
+                         "💳 Оплата заявки DB7777 в EUR: реквизиты пришлём отдельным сообщением в этом чате.")
+        self.assertEqual(self.group_cards(), ["⚠️ DB7777: клиент выбрал EUR, реквизитов нет, пришлите вручную"])
+        self.choose("EUR")
+        self.assertEqual(len(self.group_cards()), 1)
+
+    def test_env_overrides_text(self):
+        with mock.patch.dict(os.environ, {"DOCUBRIDGE_PAYMENT_TEXT_UAH": "Нові реквізити\\nрядок 2",
+                                          "DOCUBRIDGE_PAYMENT_TEXT_USD": "USD реквизиты"}):
+            self.choose("UAH")
+            self.assertIn("Нові реквізити\nрядок 2", self.client_msgs()[-1])
+            self.assertNotIn("UA853220010000026002310087318", self.client_msgs()[-1])
+            self.choose("USD")
+            self.assertIn("USD реквизиты", self.client_msgs()[-1])
+            self.assertIn("💱 DB7777: клиент выбрал USD, реквизиты выданы ботом.", self.group_cards())
+
+    def test_stale_currency_button_keeps_state(self):
+        self.states[CHAT] = ("ask_name", {"from_city": "Киев"})
+        sp = self.choose("PLN")
+        sp.assert_not_called()
+        self.assertEqual(self.states[CHAT], ("ask_name", {"from_city": "Киев"}))
+        self.assertIn("устарела", self.client_msgs()[-1])
+        self.assertEqual(self.group_cards(), [])
+
+    def test_foreign_or_unknown_order_button_keeps_state(self):
+        self.states[CHAT] = ("ask_doc_type", {"x": 1})
+        self.choose("UAH", stored=False, ticket="DB1111")
+        self.assertEqual(self.states[CHAT], ("ask_doc_type", {"x": 1}))
+        self.assertIn("не найдена", self.client_msgs()[-1])
+        self.assertNotIn("UA853220010000026002310087318", self.texts())
+        self.assertEqual(self.group_cards(), [])
+
+    def test_other_order_in_state_not_touched_and_db_down_noted(self):
+        self.states[CHAT] = ("completed", {"ticket": "DB2222"})
+        self.choose("EUR", stored=None)
+        self.assertEqual(self.states[CHAT], ("completed", {"ticket": "DB2222"}))
+        self.assertIn("БД недоступна", self.group_cards()[0])
+
+    def test_change_currency_button(self):
+        self.choose("EUR")
+        kb = [c for c in m.bot.send_message.call_args_list if c.args[0] == CHAT][-1].kwargs["reply_markup"]
+        self.assertEqual(kb.keyboard[0][0].callback_data, "ns:pay:DB7777")
+        ho.next_steps_cb(cb("ns:pay:DB7777"))
+        self.assertIn("В какой валюте", self.last()[0])
+
+    def test_thanks_says_nothing_about_when_or_how_much_to_pay(self):
+        t = ns.thanks_text("DB1", "A → B", {"weight_grams": 100}).lower()
+        for w in ("предоплат", "до передачи", "после передачи", "100%", "грн", "курс"):
+            self.assertNotIn(w, t)
 
 
 class TestAiFallbackHandoff(Base):

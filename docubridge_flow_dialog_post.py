@@ -56,7 +56,8 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         save_message(chat_id, s, thanks)
         bot.send_message(chat_id, thanks, reply_markup=main_menu())   # replaces the confirm keys
         try:
-            bot.send_message(chat_id, ns.actions_text(ticket), reply_markup=ns.next_steps_keyboard(ticket))
+            # First question after the order: payment currency (inline buttons) + other actions.
+            bot.send_message(chat_id, ns.currency_question(ticket), reply_markup=ns.currency_keyboard(ticket))
         except Exception as e:
             print(f"[NextSteps] actions message failed: {e}")
         set_state(chat_id, "completed", {"ticket": ticket})

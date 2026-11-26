@@ -174,6 +174,22 @@ def request_handoff(chat_id: int, reason: str, text: Optional[str] = None, state
         return False
 
 
+def send_group_note(chat_id: int, text: str, scope: str, window_min: int = CONFIG_WINDOW_MIN) -> bool:
+    """A one-line note to the leads target (same target/test rules as the cards), once per scope."""
+    try:
+        target = _target(chat_id)
+        if not target or not _claim(chat_id, scope, "note", None, window_min):
+            return False
+        if ncfg.is_test_lead(chat_id):
+            text = f"🧪 ТЕСТ — администратор\n{text}"
+        bot.send_message(target, text)
+        print(f"[Handoff] chat={chat_id} note {scope} → {target}")
+        return True
+    except Exception as e:
+        print(f"[Handoff] note {scope} failed: {e}")
+        return False
+
+
 def alert_not_configured(chat_id: int, ticket: str, data: Optional[Dict] = None, user=None) -> bool:
     """Once per order: tell the operator the client was promised «пришлём отдельно»."""
     missing = ns.missing_config()
@@ -230,7 +246,11 @@ def handle_special_text(chat_id: int, text: str, state: Optional[str], data: Dic
     intent = ns.faq_intent(s)
     if intent:
         ticket = data.get("ticket") if state == "completed" else None
-        ans = ns.payment_answer(ticket) if intent == "payment" else ns.handover_answer(ticket)
+        if intent == "payment" and ticket and not data.get("pay_currency"):
+            ask_currency(chat_id, ticket)
+            return True
+        ans = (ns.payment_answer(ticket, data.get("pay_currency")) if intent == "payment"
+               else ns.handover_answer(ticket))
         reply_keep_step(chat_id, ans, state, data)
         return True
     return False
@@ -257,6 +277,49 @@ def attachment_received(message):
                     state if state != DB_ERROR_STATE else None, data)
 
 
+# ------------ payment currency ------------
+
+def ask_currency(chat_id: int, ticket: str, with_actions: bool = False) -> None:
+    msg = ns.currency_question(ticket)
+    save_message(chat_id, None, msg)
+    bot.send_message(chat_id, msg, reply_markup=ns.currency_keyboard(ticket, with_actions=with_actions))
+
+
+@bot.callback_query_handler(func=lambda c: ns.parse_pc_callback(c.data) is not None)
+def currency_cb(call):
+    """Currency chosen. Never changes the funnel step; stale / foreign buttons are harmless."""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"[Pay] answer_callback_query failed: {e}")
+    chat = getattr(getattr(call, "message", None), "chat", None)
+    if chat is None or getattr(chat, "type", "private") != "private":
+        return
+    chat_id = chat.id
+    ticket, cur = ns.parse_pc_callback(call.data)
+    if cur not in ns.pcfg.currencies():
+        print(f"[Pay] chat={chat_id} stale currency button {cur} for {ticket}")
+        msg = "Эта кнопка устарела. Выберите валюту оплаты ещё раз:"
+        save_message(chat_id, None, msg)
+        bot.send_message(chat_id, msg, reply_markup=ns.currency_keyboard(ticket, with_actions=False))
+        return
+    stored = ndb.set_pay_currency(ticket, chat_id, cur)
+    if stored is False:
+        print(f"[Pay] chat={chat_id} currency button for unknown/foreign order {ticket}")
+        msg = f"Заявка {ticket} не найдена в этом чате. Проверьте номер: /track."
+        save_message(chat_id, None, msg)
+        bot.send_message(chat_id, msg, reply_markup=main_menu())
+        return
+    state, data = get_state(chat_id)
+    if state == "completed" and (data or {}).get("ticket") == ticket:
+        set_state(chat_id, "completed", dict(data, pay_currency=cur))
+    print(f"[Pay] chat={chat_id} {ticket} currency={cur} stored={stored}")
+    msg = ns.currency_payment_text(ticket, cur)
+    save_message(chat_id, None, msg)
+    bot.send_message(chat_id, msg, reply_markup=ns.after_payment_keyboard(ticket))
+    send_group_note(chat_id, ns.group_currency_note(ticket, cur, stored), scope=f"cur:{ticket}:{cur}")
+
+
 # ------------ buttons under «Что дальше» ------------
 
 @bot.callback_query_handler(func=lambda c: ns.parse_ns_callback(c.data) is not None)
@@ -271,7 +334,8 @@ def next_steps_cb(call):
     chat_id = chat.id
     action, ticket = ns.parse_ns_callback(call.data)
     if action == "pay":
-        msg = ns.payment_answer(ticket)
+        ask_currency(chat_id, ticket)
+        return
     elif action == "hand":
         msg = ns.handover_answer(ticket)
     elif action == "track":

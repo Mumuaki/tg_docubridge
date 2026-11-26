@@ -5,8 +5,11 @@ Facts come only from the code (helpers: price, envelope limit, ETA) and from env
 by the owner. Nothing is invented: when the owner has not configured something,
 the client gets a safe fallback and the operator gets an alert (see docubridge_handoff).
 
+Payment: after the order the client picks a currency (buttons); details per currency
+come from docubridge_payment_config (UAH approved; others → «пришлём отдельным сообщением»).
+
 Env (values are set by the owner; empty/unset → fallback text):
-  DOCUBRIDGE_PAYMENT_TEXT   — how to pay / payment details, shown verbatim
+  DOCUBRIDGE_PAY_CURRENCIES, DOCUBRIDGE_PAYMENT_TEXT_<CUR> — see docubridge_payment_config
   DOCUBRIDGE_HANDOVER_TEXT  — how to hand over the paper documents, shown verbatim
 """
 import os
@@ -16,31 +19,29 @@ from typing import Dict, Optional
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from docubridge_config import MANAGER_CONTACT
+import docubridge_payment_config as pcfg
 from docubridge_helpers import (
     compute_quote, ENVELOPE_MAX_G, TRACK_STATUS_RU, normalize_status,
 )
 
-ENV_PAYMENT = "DOCUBRIDGE_PAYMENT_TEXT"
 ENV_HANDOVER = "DOCUBRIDGE_HANDOVER_TEXT"
 
-PAYMENT_FALLBACK = "реквизиты для оплаты пришлём отдельным сообщением в этом чате."
+PAYMENT_FALLBACK = "реквизиты пришлём отдельным сообщением в этом чате."
+PAYMENT_CHOOSE = "выберите валюту оплаты кнопкой ниже."
 HANDOVER_FALLBACK = "как передать документы, пришлём отдельным сообщением в этом чате."
 
-BTN_NS_PAY = "💳 Как оплатить"
+BTN_NS_PAY = "💱 Сменить валюту оплаты"
 BTN_NS_HANDOVER = "📨 Как передать документы"
 BTN_NS_TRACK = "📍 Отследить"
 BTN_NS_HUMAN = "🙋 Нужен человек"
 NS_CB_PREFIX = "ns"                 # ns:<action>:<ticket>
-NS_ACTIONS = ("pay", "hand", "track", "human")
+NS_ACTIONS = ("pay", "hand", "track", "human")   # pay = (re)show the currency choice
+PC_CB_PREFIX = "pc"                 # pc:<ticket>:<CUR> — currency chosen
 
 
 def _env_text(name: str) -> Optional[str]:
     v = (os.getenv(name) or "").strip()
     return v.replace("\\n", "\n") if v else None
-
-
-def payment_text() -> Optional[str]:
-    return _env_text(ENV_PAYMENT)
 
 
 def handover_text() -> Optional[str]:
@@ -50,8 +51,6 @@ def handover_text() -> Optional[str]:
 def missing_config() -> list:
     """Human labels of what the owner has not configured yet."""
     out = []
-    if not payment_text():
-        out.append("реквизиты / способ оплаты (DOCUBRIDGE_PAYMENT_TEXT)")
     if not handover_text():
         out.append("способ передачи документов (DOCUBRIDGE_HANDOVER_TEXT)")
     return out
@@ -61,7 +60,7 @@ def price_line(data: Dict) -> str:
     q = compute_quote(data or {})
     if q.get("price_eur") is not None:
         return f"Стоимость: €{q['price_eur']} (конверт до {ENVELOPE_MAX_G} г)."
-    return "Стоимость: по согласованию (вес больше 0,5 кг) — менеджер пришлёт расчёт в этом чате."
+    return f"Стоимость: {pcfg.OVERWEIGHT_PRICE or 'по согласованию (вес больше 0,5 кг)'}."
 
 
 def eta_line(data: Dict) -> str:
@@ -79,7 +78,7 @@ def thanks_text(ticket: str, route: str, data: Dict) -> str:
         f"{price_line(data)}\n"
         f"{eta_line(data)}\n\n"
         "Что дальше:\n"
-        f"1. Оплата: {payment_text() or PAYMENT_FALLBACK}\n"
+        f"1. Оплата: {PAYMENT_CHOOSE}\n"
         f"2. Передача документов: {handover_text() or HANDOVER_FALLBACK}\n"
         "3. Статусы будут приходить сюда автоматически. Проверить в любой момент: "
         f"/track и номер {ticket} или кнопка «Отследить».\n\n"
@@ -88,7 +87,57 @@ def thanks_text(ticket: str, route: str, data: Dict) -> str:
 
 
 def actions_text(ticket: str) -> str:
-    return f"Действия по заявке {ticket}:"
+    return f"В какой валюте будете оплачивать заявку {ticket}?"
+
+
+def currency_question(ticket: str) -> str:
+    return actions_text(ticket)
+
+
+def pc_callback(ticket: str, cur: str) -> str:
+    return f"{PC_CB_PREFIX}:{ticket}:{cur}"
+
+
+def parse_pc_callback(data: Optional[str]):
+    """'pc:DB1234:UAH' → ('DB1234', 'UAH'); None if not ours (currency validity checked later)."""
+    parts = (data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != PC_CB_PREFIX or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2].upper()
+
+
+def currency_keyboard(ticket: str, with_actions: bool = True) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.row(*[InlineKeyboardButton(c, callback_data=pc_callback(ticket, c)) for c in pcfg.currencies()])
+    if with_actions:
+        kb.row(InlineKeyboardButton(BTN_NS_HANDOVER, callback_data=ns_callback("hand", ticket)))
+        kb.row(InlineKeyboardButton(BTN_NS_TRACK, callback_data=ns_callback("track", ticket)))
+        kb.row(InlineKeyboardButton(BTN_NS_HUMAN, callback_data=ns_callback("human", ticket)))
+    return kb
+
+
+def after_payment_keyboard(ticket: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton(BTN_NS_PAY, callback_data=ns_callback("pay", ticket)))
+    kb.row(InlineKeyboardButton(BTN_NS_HANDOVER, callback_data=ns_callback("hand", ticket)))
+    kb.row(InlineKeyboardButton(BTN_NS_TRACK, callback_data=ns_callback("track", ticket)))
+    kb.row(InlineKeyboardButton(BTN_NS_HUMAN, callback_data=ns_callback("human", ticket)))
+    return kb
+
+
+def currency_payment_text(ticket: str, cur: str) -> str:
+    """Client message after choosing a currency. Details verbatim; no amount, no rate."""
+    details = pcfg.payment_text_for(cur)
+    if details:
+        return f"💳 Реквизиты для оплаты заявки {ticket} ({cur}):\n{details}"
+    return f"💳 Оплата заявки {ticket} в {cur}: {PAYMENT_FALLBACK}"
+
+
+def group_currency_note(ticket: str, cur: str, stored: Optional[bool]) -> str:
+    tail = "" if stored else "\n(валюта не сохранена в БД — БД недоступна)"
+    if pcfg.payment_text_for(cur):
+        return f"💱 {ticket}: клиент выбрал {cur}, реквизиты выданы ботом.{tail}"
+    return f"⚠️ {ticket}: клиент выбрал {cur}, реквизитов нет, пришлите вручную{tail}"
 
 
 def ns_callback(action: str, ticket: str) -> str:
@@ -104,21 +153,17 @@ def parse_ns_callback(data: Optional[str]):
 
 
 def next_steps_keyboard(ticket: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton(BTN_NS_PAY, callback_data=ns_callback("pay", ticket)))
-    kb.row(InlineKeyboardButton(BTN_NS_HANDOVER, callback_data=ns_callback("hand", ticket)))
-    kb.row(InlineKeyboardButton(BTN_NS_TRACK, callback_data=ns_callback("track", ticket)))
-    kb.row(InlineKeyboardButton(BTN_NS_HUMAN, callback_data=ns_callback("human", ticket)))
-    return kb
+    return currency_keyboard(ticket)
 
 
-def payment_answer(ticket: Optional[str] = None) -> str:
-    t = payment_text()
-    if t:
-        return f"💳 Оплата{(' заявки ' + ticket) if ticket else ''}:\n{t}"
+def payment_answer(ticket: Optional[str] = None, currency: Optional[str] = None) -> str:
+    """Text answer to «как оплатить?» (no keyboard)."""
+    if ticket and currency:
+        return currency_payment_text(ticket, currency)
     if ticket:
-        return f"💳 Оплата заявки {ticket}: {PAYMENT_FALLBACK}"
-    return "💳 Оплата: реквизиты для оплаты пришлём в этом чате после оформления заявки."
+        return f"💳 Оплата заявки {ticket}: {PAYMENT_CHOOSE}"
+    return ("💳 Оплата: после оформления заявки бот предложит выбрать валюту оплаты; "
+            "реквизиты придут в этом чате.")
 
 
 def handover_answer(ticket: Optional[str] = None) -> str:
@@ -151,7 +196,7 @@ def track_hint(status: Optional[str]) -> Optional[str]:
     st = normalize_status(status) or "accepted"
     if st == "accepted":
         return ("Что дальше:\n"
-                f"• Оплата: {payment_text() or PAYMENT_FALLBACK}\n"
+                "• Оплата: выберите валюту кнопкой под сообщением о заявке.\n"
                 f"• Передача документов: {handover_text() or HANDOVER_FALLBACK}")
     nxt = status_next(st)
     return f"Что дальше: {nxt}" if nxt else None
