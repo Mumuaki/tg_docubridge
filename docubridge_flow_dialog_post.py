@@ -9,6 +9,8 @@ from docubridge_flow_steps import *  # noqa: F401,F403
 from docubridge_funnel import *  # noqa: F401,F403
 from docubridge_funnel import _off_step_answer
 from docubridge_sheets import export_shipment_async
+import docubridge_next_steps as ns
+from docubridge_handoff import request_handoff, alert_not_configured
 
 
 def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
@@ -20,7 +22,7 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
             return
         if s != BTN_CONFIRM and s.lower() not in {"подтвердить", "да", "ok", "ок"}:
             if is_step_question(s):
-                prompt_step(chat_id, "confirm", data, prefix=_off_step_answer(s))
+                prompt_step(chat_id, "confirm", data, prefix=_off_step_answer(s, chat_id, state, data))
                 return
             bot.send_message(
                 chat_id,
@@ -50,19 +52,19 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         except Exception as e:  # never break the order
             print(f"[Sheets] export error: {e}")
 
-        thanks = (
-            f"✅ Заявка оформлена.\n"
-            f"Номер отправления: {ticket}\n\n"
-            f"Маршрут: {route_line(data)}\n\n"
-            "Что дальше:\n"
-            f"1. Менеджер свяжется с вами по телефону {data.get('phone')}, "
-            "чтобы согласовать детали и передачу документов.\n"
-            f"2. Статус — кнопка «Отследить отправление» или /track и номер {ticket}.\n"
-            f"Вопросы — {MANAGER_CONTACT} (укажите номер {ticket})."
-        )
+        thanks = ns.thanks_text(ticket, route_line(data), data)
         save_message(chat_id, s, thanks)
-        bot.send_message(chat_id, thanks, reply_markup=main_menu())
+        bot.send_message(chat_id, thanks, reply_markup=main_menu())   # replaces the confirm keys
+        try:
+            bot.send_message(chat_id, ns.actions_text(ticket), reply_markup=ns.next_steps_keyboard(ticket))
+        except Exception as e:
+            print(f"[NextSteps] actions message failed: {e}")
         set_state(chat_id, "completed", {"ticket": ticket})
+        # Only non-standard orders reach a human: > 0.5 kg, or owner data not configured.
+        if compute_quote(data).get("price_eur") is None:
+            request_handoff(chat_id, "overweight", None, "completed", data, ticket=ticket,
+                            scope=f"overweight:{ticket}")
+        alert_not_configured(chat_id, ticket, data)
         return
 
     if state in {"greeting", "completed"} or not state:
@@ -87,9 +89,14 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         if "отслед" in low or "трек" in low or "status" in low:
             start_track_flow(chat_id)
             return
-        reply = (ai_reply(s) or "").strip() if looks_like_question(s) else ""
-        if not reply or reply.lower().startswith(("ошибка", "error")):
+        asked = looks_like_question(s)
+        reply = (ai_reply(s) or "").strip() if asked else ""
+        if not reply or reply.lower().startswith(AI_FAIL_PREFIXES):
             reply = FALLBACK_TEXT
+            if asked:
+                reply = (f"На этот вопрос ответит менеджер {MANAGER_CONTACT} — я передал ему ваше сообщение.\n"
+                         "Рассчитать стоимость и оформить заявку можно здесь: /start.")
+                request_handoff(chat_id, "question", s, state, data)
         else:
             reply += "\n\nМеню: /start, справка: /help."
         save_message(chat_id, s, reply)

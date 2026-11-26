@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS digest_log (
     sent_at     TIMESTAMPTZ,
     info        TEXT
 );
+CREATE TABLE IF NOT EXISTS handoff_log (
+    id          BIGSERIAL PRIMARY KEY,
+    chat_id     BIGINT NOT NULL,
+    scope       TEXT NOT NULL DEFAULT 'client',
+    reason      TEXT,
+    ticket      TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS handoff_log_chat_idx ON handoff_log (chat_id, scope, created_at);
 """
 
 
@@ -304,3 +313,34 @@ def digest_shipments(exclude_chat_id: int, limit: int = 300) -> Optional[List[Di
         return rows
 
     return _run("digest_shipments", _do, default=None)
+
+
+# ------------ «Нужен человек» throttle (handoff_log) ------------
+
+def claim_handoff(chat_id: int, scope: str, reason: str, ticket: Optional[str],
+                  window_min: int) -> Optional[bool]:
+    """True = first handoff card for (chat, scope) within window_min → send it;
+    False = one was sent recently → skip; None = DB unavailable (caller decides)."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO handoff_log (chat_id, scope, reason, ticket)
+            SELECT %s, %s, %s, %s
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM handoff_log
+                    WHERE chat_id = %s AND scope = %s
+                      AND created_at > NOW() - (%s * INTERVAL '1 minute'))
+            RETURNING id
+            """,
+            (int(chat_id), scope, reason, ticket, int(chat_id), scope, int(window_min)),
+        )
+        ok = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        return ok
+
+    return _run("claim_handoff", _do, default=None, retry=False)

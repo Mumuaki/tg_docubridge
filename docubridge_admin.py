@@ -10,6 +10,7 @@ from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow_steps import format_track_message, _fmt_dt
 from docubridge_sheets import update_status_async
+from docubridge_next_steps import status_next
 
 
 def is_admin(chat_id) -> bool:
@@ -68,7 +69,10 @@ def client_status_message(ticket: str, status: str, comment: Optional[str]) -> s
     )
     if comment:
         msg += f"\nКомментарий / трек-номер перевозчика: {comment}"
-    msg += "\nПодробнее: /track"
+    nxt = status_next(status)
+    if nxt:
+        msg += f"\n{nxt}"
+    msg += f"\nПодробнее: /track и номер {ticket}"
     return msg
 
 
