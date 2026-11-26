@@ -10,7 +10,9 @@ from docubridge_funnel import *  # noqa: F401,F403
 from docubridge_funnel import _off_step_answer
 from docubridge_sheets import export_shipment_async
 import docubridge_next_steps as ns
-from docubridge_handoff import request_handoff, alert_not_configured
+from docubridge_handoff import request_handoff
+import docubridge_lang as lang_mod
+from docubridge_texts import t as tr
 
 
 def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
@@ -31,6 +33,8 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
             )
             return
 
+        lang = lang_mod.get_lang(chat_id)
+        data["lang"] = lang                      # kept on the order: status messages use it
         ticket = create_shipment(chat_id, data)
         print(f"[Ticket] chat={chat_id} create_shipment -> {ticket or 'FAILED'} ref={data.get('ref') or '-'}")
         if not ticket:
@@ -52,20 +56,22 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         except Exception as e:  # never break the order
             print(f"[Sheets] export error: {e}")
 
-        thanks = ns.thanks_text(ticket, route_line(data), data)
+        thanks = ns.thanks_text(ticket, route_line(data), data, lang)
         save_message(chat_id, s, thanks)
         bot.send_message(chat_id, thanks, reply_markup=main_menu())   # replaces the confirm keys
         try:
-            # First question after the order: payment currency (inline buttons) + other actions.
-            bot.send_message(chat_id, ns.currency_question(ticket), reply_markup=ns.currency_keyboard(ticket))
+            # Terms + «✅ Условия подходят, нужен адрес», then the payment currency (+ actions).
+            bot.send_message(chat_id, ns.terms_text(ticket, data, lang), reply_markup=ns.terms_keyboard(ticket, lang))
+            bot.send_message(chat_id, ns.currency_question(ticket, data, lang),
+                             reply_markup=ns.currency_keyboard(ticket, lang=lang))
         except Exception as e:
-            print(f"[NextSteps] actions message failed: {e}")
-        set_state(chat_id, "completed", {"ticket": ticket})
-        # Only non-standard orders reach a human: > 0.5 kg, or owner data not configured.
+            print(f"[NextSteps] follow-up messages failed: {e}")
+        set_state(chat_id, "completed", {"ticket": ticket, "from_country": data.get("from_country"),
+                                         "to_country": data.get("to_country"), "lang": lang})
+        # Only non-standard orders reach a human here: > 0.5 kg (price is discussed with the manager).
         if compute_quote(data).get("price_eur") is None:
             request_handoff(chat_id, "overweight", None, "completed", data, ticket=ticket,
                             scope=f"overweight:{ticket}")
-        alert_not_configured(chat_id, ticket, data)
         return
 
     if state in {"greeting", "completed"} or not state:
@@ -95,8 +101,8 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         if not reply or reply.lower().startswith(AI_FAIL_PREFIXES):
             reply = FALLBACK_TEXT
             if asked:
-                reply = (f"На этот вопрос ответит менеджер {MANAGER_CONTACT} — я передал ему ваше сообщение.\n"
-                         "Рассчитать стоимость и оформить заявку можно здесь: /start.")
+                lang = lang_mod.get_lang(chat_id)
+                reply = tr("ho_question_menu", lang, manager=MANAGER_CONTACT, rt=ns.rt(lang))
                 request_handoff(chat_id, "question", s, state, data)
         else:
             reply += "\n\nМеню: /start, справка: /help."

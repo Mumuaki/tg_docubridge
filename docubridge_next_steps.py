@@ -1,18 +1,11 @@
 # -*- coding: utf-8 -*-
-"""«Что дальше» after an order DBxxxx, status explanations, payment / handover answers.
+"""After the order DBxxxx: «Что дальше», terms + «нужен адрес», currency choice,
+payment / handover answers, status explanations, /track hint — RU and UA.
 
-Facts come only from the code (helpers: price, envelope limit, ETA) and from env set
-by the owner. Nothing is invented: when the owner has not configured something,
-the client gets a safe fallback and the operator gets an alert (see docubridge_handoff).
-
-Payment: after the order the client picks a currency (buttons); details per currency
-come from docubridge_payment_config (UAH approved; others → «пришлём отдельным сообщением»).
-
-Env (values are set by the owner; empty/unset → fallback text):
-  DOCUBRIDGE_PAY_CURRENCIES, DOCUBRIDGE_PAYMENT_TEXT_<CUR> — see docubridge_payment_config
-  DOCUBRIDGE_HANDOVER_TEXT  — how to hand over the paper documents, shown verbatim
+Facts come only from helpers (price, envelope limit, ETA) and docubridge_payment_config
+(owner-approved: handover by origin, 100% prepayment after arrival in Bratislava / Moscow,
+UAH details, 24 h). Templates live in docubridge_texts. Nothing is invented here.
 """
-import os
 import re
 from typing import Dict, Optional
 
@@ -20,78 +13,77 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from docubridge_config import MANAGER_CONTACT
 import docubridge_payment_config as pcfg
+from docubridge_texts import t, STATUS_UK
 from docubridge_helpers import (
-    compute_quote, ENVELOPE_MAX_G, TRACK_STATUS_RU, normalize_status,
+    compute_quote, ENVELOPE_MAX_G, PRICE_ORDINARY_EUR, TRACK_STATUS_RU, normalize_status,
 )
 
-ENV_HANDOVER = "DOCUBRIDGE_HANDOVER_TEXT"
-
-PAYMENT_FALLBACK = "реквизиты пришлём отдельным сообщением в этом чате."
-PAYMENT_CHOOSE = "выберите валюту оплаты кнопкой ниже."
-HANDOVER_FALLBACK = "как передать документы, пришлём отдельным сообщением в этом чате."
-
-BTN_NS_PAY = "💱 Сменить валюту оплаты"
-BTN_NS_HANDOVER = "📨 Как передать документы"
-BTN_NS_TRACK = "📍 Отследить"
-BTN_NS_HUMAN = "🙋 Нужен человек"
 NS_CB_PREFIX = "ns"                 # ns:<action>:<ticket>
 NS_ACTIONS = ("pay", "hand", "track", "human")   # pay = (re)show the currency choice
 PC_CB_PREFIX = "pc"                 # pc:<ticket>:<CUR> — currency chosen
+TC_CB_PREFIX = "tc"                 # tc:<ticket> — terms accepted, address needed
 
 
-def _env_text(name: str) -> Optional[str]:
-    v = (os.getenv(name) or "").strip()
-    return v.replace("\\n", "\n") if v else None
+def rt(lang: str) -> str:
+    return pcfg.RESPONSE_TIME.get(lang, pcfg.RESPONSE_TIME["ru"])
 
 
-def handover_text() -> Optional[str]:
-    return _env_text(ENV_HANDOVER)
+def origin(data: Optional[Dict]) -> Optional[str]:
+    return pcfg.origin_of((data or {}).get("from_country"))
 
 
-def missing_config() -> list:
-    """Human labels of what the owner has not configured yet."""
-    out = []
-    if not handover_text():
-        out.append("способ передачи документов (DOCUBRIDGE_HANDOVER_TEXT)")
-    return out
+def _quote(data: Dict) -> Dict:
+    return compute_quote(data or {})
 
 
-def price_line(data: Dict) -> str:
-    q = compute_quote(data or {})
+def price_line(data: Dict, lang: str = "ru") -> str:
+    q = _quote(data)
     if q.get("price_eur") is not None:
-        return f"Стоимость: €{q['price_eur']} (конверт до {ENVELOPE_MAX_G} г)."
-    return f"Стоимость: {pcfg.OVERWEIGHT_PRICE or 'по согласованию (вес больше 0,5 кг)'}."
+        return t("price", lang, price=q["price_eur"], max_g=ENVELOPE_MAX_G)
+    return t("price_over", lang, rt=rt(lang))
 
 
-def eta_line(data: Dict) -> str:
-    q = compute_quote(data or {})
-    if q.get("eta_working"):
-        return f"Срок: ориентировочно {q['eta_working']} рабочих дней."
-    return "Срок: уточним после подтверждения маршрута."
+def eta_line(data: Dict, lang: str = "ru") -> str:
+    q = _quote(data)
+    return t("eta", lang, eta=q["eta_working"]) if q.get("eta_working") else t("eta_none", lang)
 
 
-def thanks_text(ticket: str, route: str, data: Dict) -> str:
-    return (
-        "✅ Заявка оформлена.\n"
-        f"Номер отправления: {ticket}\n"
-        f"Маршрут: {route}\n"
-        f"{price_line(data)}\n"
-        f"{eta_line(data)}\n\n"
-        "Что дальше:\n"
-        f"1. Оплата: {PAYMENT_CHOOSE}\n"
-        f"2. Передача документов: {handover_text() or HANDOVER_FALLBACK}\n"
-        "3. Статусы будут приходить сюда автоматически. Проверить в любой момент: "
-        f"/track и номер {ticket} или кнопка «Отследить».\n\n"
-        f"Нужна помощь человека — кнопка «Нужен человек» или {MANAGER_CONTACT}."
-    )
+def thanks_text(ticket: str, route: str, data: Dict, lang: str = "ru") -> str:
+    o = origin(data)
+    return t("thanks", lang, ticket=ticket, route=route, price_line=price_line(data, lang),
+             eta_line=eta_line(data, lang), handover=pcfg.handover_text(o, lang),
+             pct=pcfg.PREPAYMENT_PERCENT, arrival=pcfg.arrival(o, lang), manager=MANAGER_CONTACT)
 
 
-def actions_text(ticket: str) -> str:
-    return f"В какой валюте будете оплачивать заявку {ticket}?"
+def terms_text(ticket: str, data: Dict, lang: str = "ru") -> str:
+    q, o = _quote(data), origin(data)
+    price_short = (t("price_short", lang, price=q["price_eur"], max_g=ENVELOPE_MAX_G)
+                   if q.get("price_eur") is not None else t("price_short_over", lang))
+    eta_short = (t("eta_short", lang, eta=q["eta_working"]) if q.get("eta_working")
+                 else t("eta_short_none", lang))
+    return t("terms", lang, ticket=ticket, price_short=price_short, eta_short=eta_short,
+             ship_to=pcfg.ship_to(o, lang) or t("ship_to_any", lang),
+             pct=pcfg.PREPAYMENT_PERCENT, arrival=pcfg.arrival(o, lang))
 
 
-def currency_question(ticket: str) -> str:
-    return actions_text(ticket)
+def terms_keyboard(ticket: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton(t("btn_terms", lang), callback_data=tc_callback(ticket)))
+    return kb
+
+
+# ------------ callbacks ------------
+
+def ns_callback(action: str, ticket: str) -> str:
+    return f"{NS_CB_PREFIX}:{action}:{ticket}"
+
+
+def parse_ns_callback(data: Optional[str]):
+    """'ns:pay:DB1234' → ('pay', 'DB1234'); None if not ours."""
+    parts = (data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != NS_CB_PREFIX or parts[1] not in NS_ACTIONS:
+        return None
+    return parts[1], parts[2]
 
 
 def pc_callback(ticket: str, cur: str) -> str:
@@ -106,114 +98,170 @@ def parse_pc_callback(data: Optional[str]):
     return parts[1], parts[2].upper()
 
 
-def currency_keyboard(ticket: str, with_actions: bool = True) -> InlineKeyboardMarkup:
+def tc_callback(ticket: str) -> str:
+    return f"{TC_CB_PREFIX}:{ticket}"
+
+
+def parse_tc_callback(data: Optional[str]) -> Optional[str]:
+    parts = (data or "").split(":", 1)
+    if len(parts) != 2 or parts[0] != TC_CB_PREFIX or not parts[1]:
+        return None
+    return parts[1]
+
+
+# ------------ currency / payment ------------
+
+def currency_question(ticket: str, data: Optional[Dict] = None, lang: str = "ru") -> str:
+    return t("cur_question", lang, ticket=ticket, arrival=pcfg.arrival(origin(data), lang))
+
+
+def currency_keyboard(ticket: str, with_actions: bool = True, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
     kb.row(*[InlineKeyboardButton(c, callback_data=pc_callback(ticket, c)) for c in pcfg.currencies()])
     if with_actions:
-        kb.row(InlineKeyboardButton(BTN_NS_HANDOVER, callback_data=ns_callback("hand", ticket)))
-        kb.row(InlineKeyboardButton(BTN_NS_TRACK, callback_data=ns_callback("track", ticket)))
-        kb.row(InlineKeyboardButton(BTN_NS_HUMAN, callback_data=ns_callback("human", ticket)))
+        kb.row(InlineKeyboardButton(t("btn_handover", lang), callback_data=ns_callback("hand", ticket)))
+        kb.row(InlineKeyboardButton(t("btn_track", lang), callback_data=ns_callback("track", ticket)))
+        kb.row(InlineKeyboardButton(t("btn_human", lang), callback_data=ns_callback("human", ticket)))
     return kb
 
 
-def after_payment_keyboard(ticket: str) -> InlineKeyboardMarkup:
+def next_steps_keyboard(ticket: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    return currency_keyboard(ticket, lang=lang)
+
+
+def after_payment_keyboard(ticket: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton(BTN_NS_PAY, callback_data=ns_callback("pay", ticket)))
-    kb.row(InlineKeyboardButton(BTN_NS_HANDOVER, callback_data=ns_callback("hand", ticket)))
-    kb.row(InlineKeyboardButton(BTN_NS_TRACK, callback_data=ns_callback("track", ticket)))
-    kb.row(InlineKeyboardButton(BTN_NS_HUMAN, callback_data=ns_callback("human", ticket)))
+    kb.row(InlineKeyboardButton(t("btn_change_cur", lang), callback_data=ns_callback("pay", ticket)))
+    kb.row(InlineKeyboardButton(t("btn_handover", lang), callback_data=ns_callback("hand", ticket)))
+    kb.row(InlineKeyboardButton(t("btn_track", lang), callback_data=ns_callback("track", ticket)))
+    kb.row(InlineKeyboardButton(t("btn_human", lang), callback_data=ns_callback("human", ticket)))
     return kb
 
 
-def currency_payment_text(ticket: str, cur: str) -> str:
-    """Client message after choosing a currency. Details verbatim; no amount, no rate."""
+def pay_button_keyboard(ticket: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton(t("btn_pay", lang), callback_data=ns_callback("pay", ticket)))
+    return kb
+
+
+def currency_payment_text(ticket: str, cur: str, data: Optional[Dict] = None, lang: str = "ru") -> str:
+    """After a currency is chosen. Details verbatim; no amount, no rate; pay after arrival."""
     details = pcfg.payment_text_for(cur)
+    arr = pcfg.arrival(origin(data), lang)
     if details:
-        return f"💳 Реквизиты для оплаты заявки {ticket} ({cur}):\n{details}"
-    return f"💳 Оплата заявки {ticket} в {cur}: {PAYMENT_FALLBACK}"
+        return t("pay_details", lang, ticket=ticket, cur=cur, details=details, arrival=arr,
+                 pct=pcfg.PREPAYMENT_PERCENT)
+    return t("pay_fallback", lang, ticket=ticket, cur=cur, rt=rt(lang), arrival=arr)
 
 
-def group_currency_note(ticket: str, cur: str, stored: Optional[bool]) -> str:
+def group_currency_note(ticket: str, cur: str, stored) -> str:
     tail = "" if stored else "\n(валюта не сохранена в БД — БД недоступна)"
     if pcfg.payment_text_for(cur):
         return f"💱 {ticket}: клиент выбрал {cur}, реквизиты выданы ботом.{tail}"
     return f"⚠️ {ticket}: клиент выбрал {cur}, реквизитов нет, пришлите вручную{tail}"
 
 
-def ns_callback(action: str, ticket: str) -> str:
-    return f"{NS_CB_PREFIX}:{action}:{ticket}"
-
-
-def parse_ns_callback(data: Optional[str]):
-    """'ns:pay:DB1234' → ('pay', 'DB1234'); None if not ours."""
-    parts = (data or "").split(":", 2)
-    if len(parts) != 3 or parts[0] != NS_CB_PREFIX or parts[1] not in NS_ACTIONS:
-        return None
-    return parts[1], parts[2]
-
-
-def next_steps_keyboard(ticket: str) -> InlineKeyboardMarkup:
-    return currency_keyboard(ticket)
-
-
-def payment_answer(ticket: Optional[str] = None, currency: Optional[str] = None) -> str:
-    """Text answer to «как оплатить?» (no keyboard)."""
+def payment_answer(ticket: Optional[str] = None, currency: Optional[str] = None,
+                   data: Optional[Dict] = None, lang: str = "ru") -> str:
+    """Text answer to «как оплатить?» (pre-order, or the chosen currency)."""
     if ticket and currency:
-        return currency_payment_text(ticket, currency)
-    if ticket:
-        return f"💳 Оплата заявки {ticket}: {PAYMENT_CHOOSE}"
-    return ("💳 Оплата: после оформления заявки бот предложит выбрать валюту оплаты; "
-            "реквизиты придут в этом чате.")
+        return currency_payment_text(ticket, currency, data, lang)
+    return t("pay_preorder", lang, pct=pcfg.PREPAYMENT_PERCENT, arrival_any=pcfg.ARRIVAL_ANY[lang])
 
 
-def handover_answer(ticket: Optional[str] = None) -> str:
-    t = handover_text()
-    if t:
-        return f"📨 Передача документов{(' по заявке ' + ticket) if ticket else ''}:\n{t}"
-    if ticket:
-        return f"📨 Передача документов по заявке {ticket}: {HANDOVER_FALLBACK}"
-    return "📨 Передача документов: как передать документы, пришлём в этом чате после оформления заявки."
+def payment_request_text(ticket: str, data: Optional[Dict], cur: Optional[str], lang: str = "ru") -> str:
+    """Admin «документы получены — запросить оплату» → client."""
+    o = origin(data)
+    arr = pcfg.ARRIVAL[o][lang] if o in pcfg.ARRIVAL else t("payreq_arrived_any", lang)
+    if cur and pcfg.payment_text_for(cur):
+        body = t("payreq_details", lang, cur=cur, details=pcfg.payment_text_for(cur))
+    elif cur:
+        body = t("payreq_fallback", lang, cur=cur, rt=rt(lang))
+    else:
+        body = t("payreq_choose", lang)
+    return t("payreq", lang, ticket=ticket, arrival=arr, pct=pcfg.PREPAYMENT_PERCENT, body=body)
 
 
-# ------------ status explanations (no new promises: only what the stage means) ------------
+# ------------ handover / address ------------
 
-STATUS_NEXT_RU = {
-    "accepted": "Заявка принята. Дальше — оплата и передача документов "
-                "(см. «Что дальше» в сообщении о заявке).",
-    "departed_hub": "Документы в пути. Следующий статус придёт сюда автоматически.",
-    "at_hub": "Документы на хабе. Следующий статус придёт сюда автоматически.",
-    "destination_country": "Отправление в стране назначения. Следующий статус придёт сюда автоматически.",
-    "delivered": "Отправление доставлено. Спасибо, что выбрали DocuBridge!",
-}
+def handover_answer(ticket: Optional[str] = None, data: Optional[Dict] = None, lang: str = "ru") -> str:
+    o = origin(data)
+    note = (t("addr_note_order", lang, btn=t("btn_terms", lang)) if ticket
+            else t("addr_note_preorder", lang))
+    for_ticket = t("for_ticket", lang, ticket=ticket) if ticket else ""
+    return t("handover", lang, for_ticket=for_ticket, handover=pcfg.handover_text(o, lang), addr_note=note)
 
 
-def status_next(status: Optional[str]) -> Optional[str]:
-    return STATUS_NEXT_RU.get(normalize_status(status) or "")
+def address_answer(ticket: Optional[str], lang: str = "ru") -> str:
+    return t("addr_order", lang) if ticket else t("addr_preorder", lang)
 
 
-def track_hint(status: Optional[str]) -> Optional[str]:
-    """Extra line under /track for the order's own chat."""
+def address_card(ticket: str, payload: Dict, who: str, chat_id: int, accepted_at: str, lang: str) -> str:
+    o = origin(payload)
+    from docubridge_keyboards import route_line
+    lines = [
+        f"📬 {ticket}: клиент согласен, нужен адрес ({pcfg.ADDRESS_TAG.get(o, 'маршрут не определён')})",
+        f"Маршрут: {route_line(payload or {})}",
+        f"Куда нужен адрес: {pcfg.ADDRESS_PLACE.get(o, '—')}",
+        f"Клиент: {who}",
+        f"Chat ID: {chat_id}",
+        f"Язык клиента: {'UA' if lang == 'uk' else 'RU'}",
+        f"Условия приняты: {accepted_at}",
+        f"Карточка заявки: /order {ticket}",
+    ]
+    return "\n".join(lines)
+
+
+# ------------ statuses / track ------------
+
+def status_name(status: str, lang: str = "ru") -> str:
+    st = normalize_status(status) or status
+    return (STATUS_UK if lang == "uk" else TRACK_STATUS_RU).get(st, st)
+
+
+def status_next(status: Optional[str], lang: str = "ru") -> Optional[str]:
+    st = normalize_status(status)
+    return t(f"st_next_{st}", lang) if st else None
+
+
+def client_status_message(ticket: str, status: str, comment: Optional[str], lang: str = "ru") -> str:
+    msg = t("st_head", lang, ticket=ticket, status=status_name(status, lang))
+    if comment:
+        msg += "\n" + t("st_comment", lang, comment=comment)
+    nxt = status_next(status, lang)
+    if nxt:
+        msg += "\n" + nxt
+    return msg + "\n" + t("st_more", lang, ticket=ticket)
+
+
+def track_hint(status: Optional[str], data: Optional[Dict] = None, lang: str = "ru") -> Optional[str]:
+    """Extra lines under /track for the order's own chat."""
     st = normalize_status(status) or "accepted"
+    o = origin(data)
     if st == "accepted":
-        return ("Что дальше:\n"
-                "• Оплата: выберите валюту кнопкой под сообщением о заявке.\n"
-                f"• Передача документов: {handover_text() or HANDOVER_FALLBACK}")
-    nxt = status_next(st)
-    return f"Что дальше: {nxt}" if nxt else None
+        return t("track_hint_accepted", lang, handover=pcfg.handover_text(o, lang),
+                 pct=pcfg.PREPAYMENT_PERCENT, arrival=pcfg.arrival(o, lang))
+    nxt = status_next(st, lang)
+    return t("track_hint_other", lang, next=nxt) if nxt else None
 
 
 # ------------ FAQ intents answered without AI ------------
 
-PAYMENT_RE = re.compile(r"оплат|оплач|реквизит|заплат|платить|плачу|предоплат|счёт на|счет на|iban|\bкарт(?:ой|у)\b")
+ADDRESS_RE = re.compile(r"адрес|куда (?:отправ|присыл|слать|высыл)|куди (?:надісл|відправ|надсил)")
+PAYMENT_RE = re.compile(r"оплат|оплач|реквизит|реквізит|заплат|платить|платити|сплат|плачу|предоплат|передоплат"
+                        r"|сч[её]т на|iban|\bкарт(?:ой|у|ою)\b")
 HANDOVER_RE = re.compile(
-    r"передать документ|передач[аиу] документ|как передать|куда (?:принести|привезти|отправить|отнести)"
-    r"|адрес для|ваш адрес|забер[её]те|курьер|нов[аой]+ пошт|почтой"
+    r"передать документ|передач[аиу] документ|передати документ|як передати|как передать"
+    r"|куда (?:принести|привезти|отнести)|куди (?:принести|привезти|віднести)"
+    r"|забер[её]те|заберете|курь?ер|кур.?єр|нов[аой]+ пошт|почтой|поштою|сдэк|сдек"
 )
 
 
 def faq_intent(text: Optional[str]) -> Optional[str]:
-    """'payment' | 'handover' | None."""
+    """'address' | 'payment' | 'handover' | None."""
     low = (text or "").lower()
+    if ADDRESS_RE.search(low):
+        return "address"
     if PAYMENT_RE.search(low):
         return "payment"
     if HANDOVER_RE.search(low):

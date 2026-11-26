@@ -5,7 +5,10 @@ from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_flow_steps import send_db_error
 from docubridge_flow_dialog_pre import handle_answer_pre
 from docubridge_flow_dialog_post import handle_answer_post
-from docubridge_handoff import handle_special_text
+from docubridge_handoff import handle_special_text, is_button
+import docubridge_lang as lang_mod
+
+DATA_STEPS = {"ask_name", "ask_phone", "ask_from_city", "ask_to_city"}
 
 
 def profile_name(user) -> Optional[str]:
@@ -28,6 +31,10 @@ def handle_answer(chat_id: int, text: str, tg_name: Optional[str] = None, user=N
     if tg_name and data.get("tg_name") != tg_name:
         data["tg_name"] = tg_name
     save_message(chat_id, text, None)
+    # Language = the client's last free text. Not from RU button labels, and not from data
+    # typed on name / phone / city steps (a name «Ірина» says nothing about the language).
+    if not is_button(text) and (state not in DATA_STEPS or is_step_question(text)):
+        lang_mod.remember(chat_id, text)
     if handle_special_text(chat_id, text, state, data, user):   # handoff triggers + payment FAQ
         return
     if handle_answer_pre(chat_id, text, state, data):

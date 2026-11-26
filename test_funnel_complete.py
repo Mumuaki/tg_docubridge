@@ -250,7 +250,7 @@ class TestEditAndFinish(FunnelBase):
         with mock.patch.object(fpost, "create_shipment", return_value="DB777"), \
                 mock.patch.object(fpost, "notify_admin_lead"), mock.patch.object(fpost, "export_shipment_async"):
             self.say(m.BTN_CONFIRM)
-        t = self.sent[-2][0]
+        t = self.sent[-3][0]
         for w in ("DB777", "Что дальше", "Оплата", "Передача документов", "/track", "€140"):
             self.assertIn(w, t)
         self.assertNotIn("Менеджер свяжется", t)

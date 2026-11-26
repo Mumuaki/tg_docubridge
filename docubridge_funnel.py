@@ -154,7 +154,11 @@ def _off_step_answer(s: str, chat_id: Optional[int] = None, state: Optional[str]
         except Exception as e:  # never break the funnel
             print(f"[Funnel] ai_reply error: {e}")
     if not reply or reply.lower().startswith(AI_FAIL_PREFIXES):
-        reply = f"На этот вопрос подробно ответит менеджер: {MANAGER_CONTACT}."
+        import docubridge_lang as lang_mod
+        from docubridge_texts import t as tr
+        lang = lang_mod.get_lang(chat_id) if chat_id is not None else "ru"
+        import docubridge_payment_config as pcfg
+        reply = tr("ho_question_step", lang, manager=MANAGER_CONTACT, rt=pcfg.RESPONSE_TIME[lang])
         if chat_id is not None and looks_like_question(s):
             from docubridge_handoff import request_handoff  # lazy: handoff imports this module
             request_handoff(chat_id, "question", s, state, data)
