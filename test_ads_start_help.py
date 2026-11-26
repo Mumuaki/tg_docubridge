@@ -37,15 +37,25 @@ class Base(unittest.TestCase):
             return self.states.get(cid, (None, {}))
 
         def send(cid, text, reply_markup=None, **kw):
+            mid = len(self.sent) + 1
+            self.send_calls.append((text, reply_markup))
             self.sent.append((text, reply_markup))
+            return SimpleNamespace(message_id=mid)
+
+        def edit_markup(cid, message_id, reply_markup=None, **kw):
+            idx = message_id - 1
+            if 0 <= idx < len(self.sent):
+                self.sent[idx] = (self.sent[idx][0], reply_markup)
 
         self.patches = []
+        self.send_calls = []
         for mod in (h, fs, fd, fpre, fpost, fun):
             for name, val in (("set_state", set_state), ("get_state", get_state),
                               ("save_message", lambda *a, **k: None)):
                 if hasattr(mod, name):
                     p = mock.patch.object(mod, name, val); p.start(); self.patches.append(p)
         p = mock.patch.object(m.bot, "send_message", side_effect=send); p.start(); self.patches.append(p)
+        p = mock.patch.object(m.bot, "edit_message_reply_markup", side_effect=edit_markup); p.start(); self.patches.append(p)
         p = mock.patch.object(m.bot, "answer_callback_query", return_value=None); p.start(); self.patches.append(p)
         self.ai = mock.patch.object(fpost, "ai_reply", return_value="Ответ AI"); self.ai_m = self.ai.start()
         self.patches.append(self.ai)

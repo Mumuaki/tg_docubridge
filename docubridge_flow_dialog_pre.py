@@ -36,7 +36,7 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
         return True
     if s == MENU_ALLOWED:
         if state == "route_offer":
-            show_allowed_docs(chat_id, reply_markup=offer_keyboard())
+            show_allowed_docs(chat_id, offer=True)
         else:
             show_allowed_docs(chat_id)
         return True
@@ -76,10 +76,9 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
             prompt_step(chat_id, "ask_doc_type", data)
             return True
         reply = step_question_answer() if is_step_question(s) else ""
-        bot.send_message(
+        send_offer_message(
             chat_id,
             (reply + "\n\n" if reply else "") + "Нажмите «Рассчитать точно», чтобы получить цену.",
-            reply_markup=offer_keyboard(),
         )
         return True
 

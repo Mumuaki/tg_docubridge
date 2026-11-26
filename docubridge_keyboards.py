@@ -44,12 +44,37 @@ def urgency_keyboard() -> ReplyKeyboardMarkup:
     return kb
 
 
-def offer_keyboard() -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(KeyboardButton(BTN_CALC))
-    kb.add(KeyboardButton(MENU_ALLOWED))
-    kb.add(KeyboardButton(BTN_MENU))
+def offer_inline_keyboard() -> InlineKeyboardMarkup:
+    """Buttons under the route-offer message (not a bottom reply keyboard)."""
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton(BTN_CALC, callback_data=OFFER_CB_CALC))
+    kb.row(InlineKeyboardButton(MENU_ALLOWED, callback_data=OFFER_CB_ALLOWED))
+    kb.row(InlineKeyboardButton(BTN_MENU, callback_data=OFFER_CB_MENU))
     return kb
+
+
+def send_offer_message(chat_id: int, text: str) -> None:
+    """Send offer (or an offer-step follow-up) with inline buttons.
+
+    Also hides any leftover reply keyboard (old «Рассчитать точно», main menu,
+    route list, doc-type keys after «← Назад»). Telegram does not allow
+    ReplyKeyboardRemove and an inline keyboard on the same send, so we send
+    Remove first and attach the inline buttons by editing that message.
+    If edit is unavailable (no integer message_id — e.g. a test stub), we
+    send one message with the inline keyboard only.
+    Does not touch later reply keyboards (phone request_contact, cities, …):
+    those are sent by their own steps after the user leaves the offer.
+    """
+    kb = offer_inline_keyboard()
+    sent = bot.send_message(chat_id, text, reply_markup=ReplyKeyboardRemove())
+    mid = getattr(sent, "message_id", None)
+    if isinstance(mid, int):
+        try:
+            bot.edit_message_reply_markup(chat_id, mid, reply_markup=kb)
+            return
+        except Exception as e:
+            print(f"[Offer] edit_message_reply_markup failed: {e}")
+    bot.send_message(chat_id, text, reply_markup=kb)
 
 
 def _nav_row(kb: ReplyKeyboardMarkup, back: bool = True) -> ReplyKeyboardMarkup:
